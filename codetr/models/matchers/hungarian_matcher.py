@@ -166,7 +166,8 @@ class HungarianMatcher(nn.Module):
         pred_probs = pred_logits_flat.sigmoid()  # (B*Q, C)
 
         # Concatenate all target labels and boxes
-        target_labels = torch.cat([t["labels"] for t in targets])  # (total_targets,)
+        # Ensure labels are long type for indexing (empty tensors may have wrong dtype)
+        target_labels = torch.cat([t["labels"].long() for t in targets])  # (total_targets,)
         target_boxes = torch.cat([t["boxes"] for t in targets])  # (total_targets, 4)
 
         # Handle empty targets case

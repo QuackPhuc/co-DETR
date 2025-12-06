@@ -33,11 +33,12 @@ class TestCoDeformDETRHead:
         
         cls_scores, bbox_preds, _ = head(hidden_states, references)
         
-        # Classification: (batch, num_queries, num_classes)
-        assert cls_scores.shape == (2, 300, 80)
+        # Classification: (num_layers, batch, num_queries, num_classes)
+        # Note: forward() returns stacked outputs for all decoder layers for auxiliary losses
+        assert cls_scores.shape == (6, 2, 300, 80)
         
-        # Box predictions: (batch, num_queries, 4)
-        assert bbox_preds.shape == (2, 300, 4)
+        # Box predictions: (num_layers, batch, num_queries, 4)
+        assert bbox_preds.shape == (6, 2, 300, 4)
     
     def test_loss_computation(self):
         """Test loss computation with targets."""
@@ -121,13 +122,12 @@ class TestRPNHead:
     
     def test_forward_output_format(self):
         """Test RPN forward pass outputs."""
-        head = RPNHead(
-            in_channels=256,
-            num_anchors=3,
-        )
+        # Note: RPNHead uses anchor_scales/ratios to determine num_anchors internally
+        # Default: 3 scales * 3 ratios = 9 anchors
+        head = RPNHead(in_channels=256)
         head.init_weights()
         
-        # Multi-scale features
+        # Multi-scale features (must match anchor_strides length which is 4 by default)
         features = [
             torch.randn(2, 256, 100, 100),
             torch.randn(2, 256, 50, 50),
@@ -135,34 +135,42 @@ class TestRPNHead:
             torch.randn(2, 256, 13, 13),
         ]
         
-        cls_scores, bbox_preds = head(features)
+        # RPNHead.forward() returns (proposals, losses) tuple
+        # proposals is a list of boxes per image, not multi-scale outputs
+        proposals, losses = head(features)
         
-        # Should return multi-scale outputs
-        assert len(cls_scores) == 4
-        assert len(bbox_preds) == 4
+        # proposals is list with one entry per batch item
+        assert isinstance(proposals, list)
+        assert len(proposals) == 2  # batch_size
         
-        # Check shapes for first level
-        # cls: (batch, num_anchors, H, W)
-        assert cls_scores[0].shape[:2] == (2, 3)
-        # bbox: (batch, num_anchors * 4, H, W)
-        assert bbox_preds[0].shape[:2] == (2, 12)
+        # Each proposal is (num_proposals, 4) in xyxy format
+        for prop in proposals:
+            assert prop.dim() == 2
+            assert prop.shape[1] == 4
     
     def test_anchor_generation(self):
         """Test anchor generation for different feature sizes."""
-        head = RPNHead(in_channels=256, num_anchors=9)
+        head = RPNHead(in_channels=256)
         
         # Verify anchor generator exists
-        assert hasattr(head, 'anchor_generator') or hasattr(head, 'anchors')
+        assert hasattr(head, 'anchor_generator')
     
     def test_gradient_flow(self):
         """Test gradients flow through RPN."""
-        head = RPNHead(in_channels=256, num_anchors=3)
+        head = RPNHead(in_channels=256)
         
-        features = [torch.randn(1, 256, 10, 10, requires_grad=True)]
+        # Need at least 4 feature levels to match anchor_strides
+        features = [
+            torch.randn(1, 256, 10, 10, requires_grad=True),
+            torch.randn(1, 256, 5, 5, requires_grad=True),
+            torch.randn(1, 256, 3, 3, requires_grad=True),
+            torch.randn(1, 256, 2, 2, requires_grad=True),
+        ]
         
-        cls_scores, bbox_preds = head(features)
+        proposals, losses = head(features)
         
-        loss = cls_scores[0].sum() + bbox_preds[0].sum()
+        # proposals need gradients through them for backprop
+        loss = proposals[0].sum()
         loss.backward()
         
         assert features[0].grad is not None
@@ -176,7 +184,7 @@ class TestRoIHead:
         head = RoIHead(
             in_channels=256,
             num_classes=20,
-            roi_out_size=7,
+            roi_feat_size=7,
         )
         head.init_weights()
         
@@ -185,20 +193,23 @@ class TestRoIHead:
             torch.randn(2, 256, 25, 25),
         ]
         
-        # Proposals: list of (N, 4) boxes per image
+        # Proposals: list of (N, 4) boxes per image in xyxy format
         proposals = [
             torch.tensor([[10.0, 10.0, 30.0, 30.0], [20.0, 20.0, 40.0, 40.0]]),
             torch.tensor([[5.0, 5.0, 25.0, 25.0]]),
         ]
         
-        cls_scores, bbox_preds = head(features, proposals)
+        # RoIHead.forward() returns (cls_scores, bbox_preds, losses) tuple
+        cls_scores, bbox_preds, losses = head(features, proposals)
         
         # Total proposals: 2 + 1 = 3
         assert cls_scores.shape[0] == 3
-        assert cls_scores.shape[1] == 20 + 1  # +1 for background
+        # num_classes without background (RoI head uses focal loss, no explicit bg class)
+        assert cls_scores.shape[1] == 20
         
         assert bbox_preds.shape[0] == 3
-        assert bbox_preds.shape[1] == 4  # or 4 * (num_classes + 1) for class-specific
+        # Class-specific bbox predictions: 4 * num_classes
+        assert bbox_preds.shape[1] == 4 * 20
 
 
 class TestATSSHead:
@@ -218,20 +229,25 @@ class TestATSSHead:
             torch.randn(2, 256, 25, 25),
         ]
         
-        cls_scores, bbox_preds, centernesses = head(features)
+        # ATSSHead.forward() returns 4 values: (cls_scores, bbox_preds, centernesses, losses)
+        cls_scores, bbox_preds, centernesses, losses = head(features)
         
-        # Multi-scale outputs
+        # Multi-scale outputs (one per feature level)
         assert len(cls_scores) == 3
         assert len(bbox_preds) == 3
         assert len(centernesses) == 3
         
-        # Classification: (batch, num_classes, H, W)
+        # losses should be None without targets
+        assert losses is None
+        
+        # Classification: (batch, num_anchors*num_classes, H, W)
+        # With 1 anchor per location and 80 classes, shape[1] == 80
         assert cls_scores[0].shape[1] == 80
         
-        # Box: (batch, 4, H, W)
+        # Box: (batch, num_anchors*4, H, W) = (batch, 4, H, W)
         assert bbox_preds[0].shape[1] == 4
         
-        # Centerness: (batch, 1, H, W)
+        # Centerness: (batch, num_anchors, H, W) = (batch, 1, H, W)
         assert centernesses[0].shape[1] == 1
     
     def test_centerness_prediction(self):
@@ -240,7 +256,8 @@ class TestATSSHead:
         
         features = [torch.randn(1, 256, 10, 10)]
         
-        _, _, centernesses = head(features)
+        # ATSSHead.forward() returns 4 values
+        _, _, centernesses, _ = head(features)
         
         # Centerness should be produced
         assert centernesses is not None
@@ -252,7 +269,8 @@ class TestATSSHead:
         
         features = [torch.randn(1, 128, 8, 8, requires_grad=True)]
         
-        cls_scores, bbox_preds, centernesses = head(features)
+        # ATSSHead.forward() returns 4 values
+        cls_scores, bbox_preds, centernesses, _ = head(features)
         
         loss = cls_scores[0].sum() + bbox_preds[0].sum() + centernesses[0].sum()
         loss.backward()
@@ -279,12 +297,18 @@ class TestMultiHeadIntegration:
             torch.randn(1, embed_dim, 25, 25),
         ]
         
-        # RPN forward
-        rpn_cls, rpn_box = rpn_head(features)
-        assert len(rpn_cls) == 2
+        # RPN forward - needs 4 feature levels to match default anchor_strides
+        # So we add more feature levels
+        features_4levels = features + [
+            torch.randn(1, embed_dim, 13, 13),
+            torch.randn(1, embed_dim, 7, 7),
+        ]
+        rpn_proposals, rpn_losses = rpn_head(features_4levels)
+        # proposals is a list per batch item
+        assert isinstance(rpn_proposals, list)
         
-        # ATSS forward
-        atss_cls, atss_box, atss_cnt = atss_head(features)
+        # ATSS forward - returns 4 values
+        atss_cls, atss_box, atss_cnt, _ = atss_head(features)
         assert len(atss_cls) == 2
         
         # All heads should process features without error
