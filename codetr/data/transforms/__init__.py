@@ -11,6 +11,8 @@ from .transforms import (
     Resize,
     RandomHorizontalFlip,
     Pad,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     "Resize",
     "RandomHorizontalFlip",
     "Pad",
+    "IMAGENET_MEAN",
+    "IMAGENET_STD",
 ]

@@ -6,7 +6,6 @@ This guide provides step-by-step instructions for setting up and testing the Co-
 
 ```bash
 !git clone https://github.com/QuackPhuc/co-DETR.git
-%cd co-DETR
 ```
 
 ## 2. Install Dependencies
@@ -14,6 +13,7 @@ This guide provides step-by-step instructions for setting up and testing the Co-
 Install the package in editable mode (recommended for testing):
 
 ```bash
+%cd /content/co-DETR
 !pip install -e .
 ```
 
