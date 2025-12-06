@@ -78,7 +78,7 @@ class TestComputeAP:
         
         ap = compute_ap(recalls, precisions)
         
-        assert torch.allclose(ap, torch.tensor(1.0), atol=1e-2)
+        assert abs(ap - 1.0) < 1e-3
     
     def test_no_detections_ap_zero(self):
         """No true positives should give AP = 0."""
@@ -87,7 +87,7 @@ class TestComputeAP:
         
         ap = compute_ap(recalls, precisions)
         
-        assert ap <= 0.01  # Essentially zero
+        assert ap <= 1e-3
 
 
 class TestMatchPredictionsToGT:
@@ -102,14 +102,15 @@ class TestMatchPredictionsToGT:
         gt_boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0]])
         gt_labels = torch.tensor([0])
         
-        matches = match_predictions_to_gt(
+        tp, matched_gt = match_predictions_to_gt(
             pred_boxes, pred_scores, pred_labels,
             gt_boxes, gt_labels,
             iou_threshold=0.5
         )
         
         # Should match prediction 0 to gt 0
-        assert matches[0] == 0
+        assert tp[0] == True  # Is a true positive
+        assert matched_gt[0] == 0  # Matched to GT index 0
     
     def test_no_match_wrong_class(self):
         """Different class labels should not match."""
@@ -120,14 +121,15 @@ class TestMatchPredictionsToGT:
         gt_boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0]])
         gt_labels = torch.tensor([1])  # Different class
         
-        matches = match_predictions_to_gt(
+        tp, matched_gt = match_predictions_to_gt(
             pred_boxes, pred_scores, pred_labels,
             gt_boxes, gt_labels,
             iou_threshold=0.5
         )
         
-        # Should not match
-        assert matches[0] == -1
+        # Should not match (different class)
+        assert tp[0] == False
+        assert matched_gt[0] == -1
     
     def test_no_match_low_iou(self):
         """Low IoU should not match."""
@@ -138,13 +140,15 @@ class TestMatchPredictionsToGT:
         gt_boxes = torch.tensor([[50.0, 50.0, 60.0, 60.0]])  # Far away
         gt_labels = torch.tensor([0])
         
-        matches = match_predictions_to_gt(
+        tp, matched_gt = match_predictions_to_gt(
             pred_boxes, pred_scores, pred_labels,
             gt_boxes, gt_labels,
             iou_threshold=0.5
         )
         
-        assert matches[0] == -1
+        # Should not match (low IoU)
+        assert tp[0] == False
+        assert matched_gt[0] == -1
 
 
 class TestDetectionEvaluator:
@@ -202,7 +206,7 @@ class TestDetectionEvaluator:
         
         # After reset, internal state should be empty
         assert len(evaluator.predictions) == 0
-        assert len(evaluator.targets) == 0
+        assert len(evaluator.ground_truths) == 0
     
     def test_ap_value_range(self):
         """AP values should be in [0, 1]."""
