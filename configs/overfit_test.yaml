@@ -1,0 +1,85 @@
+# Co-DETR Overfitting Test Configuration
+# =======================================
+#
+# This configuration is optimized for quickly validating that the full
+# training pipeline works correctly by overfitting on a tiny synthetic dataset.
+#
+# Usage:
+#   1. Generate sample dataset:
+#      python tools/create_sample_dataset.py --output data/sample --num-classes 2
+#
+#   2. Run overfitting test:
+#      python tools/train.py --config configs/overfit_test.yaml
+#
+# Expected Results:
+#   - Loss should decrease steadily
+#   - After 20 epochs, training loss should be < 1.0
+#   - Model should achieve > 90% AP on training set (overfit)
+
+# Model Architecture (simplified for fast iteration)
+model:
+  type: "CoDETR"
+  num_classes: 2           # Match your sample dataset classes
+  embed_dim: 256
+  num_queries: 100         # Reduced for faster processing
+  num_feature_levels: 4
+  num_encoder_layers: 3    # Reduced for faster training
+  num_decoder_layers: 3    # Reduced for faster training
+  
+  # Disable auxiliary heads for simpler debugging
+  use_rpn: false
+  use_roi: false
+  use_atss: false
+  
+  # Disable query denoising for simpler debugging
+  use_dn: false
+  
+  # Backbone settings
+  pretrained_backbone: true
+  frozen_backbone_stages: 1
+  aux_loss_weight: 1.0
+
+# Training Configuration (optimized for fast overfitting)
+train:
+  epochs: 20               # Small number for quick validation
+  batch_size: 2            # Small batch for tiny dataset
+  num_workers: 0           # Single worker for simplicity
+  
+  # Optimizer (higher LR for fast convergence)
+  optimizer:
+    type: "AdamW"
+    lr: 0.0005             # Higher LR for fast overfitting
+    weight_decay: 0.0001
+    backbone_lr_mult: 0.1
+  
+  # Learning rate scheduler
+  lr_scheduler:
+    type: "step"
+    step_size: 15          # Decay at epoch 15
+    gamma: 0.1
+    warmup_epochs: 1
+    warmup_lr_ratio: 0.01
+  
+  # Training options
+  gradient_clip: 0.1
+  amp: true                # Mixed precision for speed
+  
+  # Logging
+  checkpoint_interval: 5   # Save every 5 epochs
+  log_interval: 5          # Log every 5 iterations
+
+# Data Configuration
+data:
+  train_root: "data/sample/train"
+  val_root: "data/sample/val"
+  train_ann: null
+  val_ann: null
+  img_size: 640            # Smaller size for faster processing
+  max_size: 800
+
+# Evaluation Configuration
+eval:
+  interval: 5              # Evaluate every 5 epochs
+  score_threshold: 0.05
+  nms_threshold: 0.5
+  max_detections: 50

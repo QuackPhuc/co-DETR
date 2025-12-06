@@ -1,0 +1,88 @@
+# Co-DETR Configuration for YOLOv5 Format Datasets
+# ================================================
+#
+# This is an example configuration file for training Co-DETR on
+# custom datasets in YOLOv5 format.
+#
+# Dataset structure expected:
+#   data/
+#   ├── train/
+#   │   ├── images/
+#   │   │   ├── image1.jpg
+#   │   │   └── ...
+#   │   └── labels/
+#   │       ├── image1.txt
+#   │       └── ...
+#   └── val/
+#       ├── images/
+#       └── labels/
+#
+# Label format (YOLOv5): class_id cx cy w h (normalized 0-1)
+
+# Model Architecture
+model:
+  type: "CoDETR"
+  num_classes: 80  # Change to your dataset's number of classes
+  embed_dim: 256
+  num_queries: 300
+  num_feature_levels: 4
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  
+  # Auxiliary heads for collaborative training
+  use_rpn: true
+  use_roi: true
+  use_atss: true
+  
+  # Query denoising
+  use_dn: true
+  
+  # Backbone settings
+  pretrained_backbone: true
+  frozen_backbone_stages: 1  # Freeze first stage of backbone
+  aux_loss_weight: 1.0
+
+# Training Configuration
+train:
+  epochs: 12
+  batch_size: 2  # Adjust based on GPU memory
+  num_workers: 4
+  
+  # Optimizer
+  optimizer:
+    type: "AdamW"
+    lr: 0.0002
+    weight_decay: 0.0001
+    backbone_lr_mult: 0.1  # Lower LR for backbone (transfer learning)
+  
+  # Learning rate scheduler
+  lr_scheduler:
+    type: "step"
+    step_size: 11  # Decay LR at epoch 11
+    gamma: 0.1
+    warmup_epochs: 0
+    warmup_lr_ratio: 0.001
+  
+  # Training options
+  gradient_clip: 0.1
+  amp: true  # Mixed precision training
+  
+  # Checkpointing and logging
+  checkpoint_interval: 1  # Save every N epochs
+  log_interval: 50  # Log every N iterations
+
+# Data Configuration
+data:
+  train_root: "data/train"  # Path to training data
+  val_root: "data/val"      # Path to validation data
+  train_ann: null           # Optional: annotation file
+  val_ann: null
+  img_size: 800             # Minimum image size
+  max_size: 1333            # Maximum image size
+
+# Evaluation Configuration
+eval:
+  interval: 1               # Evaluate every N epochs
+  score_threshold: 0.05     # Score threshold for detections
+  nms_threshold: 0.5        # NMS IoU threshold
+  max_detections: 100       # Maximum detections per image

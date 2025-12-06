@@ -1,0 +1,59 @@
+# Co-DETR Default Configuration
+# ResNet-50 backbone for COCO-like detection
+
+# Model Architecture
+model:
+  type: "CoDETR"
+  num_classes: 80
+  embed_dim: 256
+  num_queries: 300
+  num_feature_levels: 4
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  use_rpn: true
+  use_roi: true
+  use_atss: true
+  use_dn: true
+  aux_loss_weight: 1.0
+  pretrained_backbone: true
+  frozen_backbone_stages: 1
+
+# Training Configuration
+train:
+  epochs: 12
+  batch_size: 2
+  num_workers: 4
+  
+  optimizer:
+    type: "AdamW"
+    lr: 0.0002
+    weight_decay: 0.0001
+    backbone_lr_mult: 0.1
+  
+  lr_scheduler:
+    type: "step"
+    step_size: 11
+    gamma: 0.1
+    warmup_epochs: 0
+    warmup_lr_ratio: 0.001
+  
+  gradient_clip: 0.1
+  amp: true
+  checkpoint_interval: 1
+  log_interval: 50
+
+# Data Configuration
+data:
+  train_root: "data/train"
+  val_root: "data/val"
+  train_ann: null
+  val_ann: null
+  img_size: 800
+  max_size: 1333
+
+# Evaluation Configuration
+eval:
+  interval: 1
+  score_threshold: 0.05
+  nms_threshold: 0.5
+  max_detections: 100
