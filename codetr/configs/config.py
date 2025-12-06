@@ -319,6 +319,20 @@ class Config:
     def __contains__(self, key: str) -> bool:
         """Check if key exists (supports dot notation)."""
         return self.get(key) is not None
+    
+    def __len__(self) -> int:
+        """Return number of top-level keys."""
+        return len(self._cfg)
+    
+    def __getitem__(self, key: str) -> Any:
+        """Allow dictionary-style access."""
+        return self._cfg[key]
+    
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Allow dictionary-style setting."""
+        if isinstance(value, dict) and not isinstance(value, ConfigDict):
+            value = ConfigDict(value)
+        self._cfg[key] = value
 
 
 def load_config(filepath: Union[str, Path]) -> Config:
@@ -397,3 +411,22 @@ def get_default_config() -> Config:
         },
     }
     return Config(default_cfg)
+
+
+def merge_config(base: Config, override: Union[Dict, "Config"]) -> Config:
+    """Merge override values into base config.
+    
+    Args:
+        base: Base Config object.
+        override: Override values as dict or Config.
+        
+    Returns:
+        New merged Config.
+        
+    Example:
+        >>> merged = merge_config(base_config, {"train": {"batch_size": 8}})
+    """
+    if isinstance(override, Config):
+        override = override.to_dict()
+    override_config = Config(override)
+    return base.merge(override_config)
