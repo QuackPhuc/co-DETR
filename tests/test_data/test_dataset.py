@@ -50,14 +50,19 @@ class TestYOLODatasetAnnotationParsing:
     
     def test_getitem_returns_correct_format(self, sample_dataset):
         """Test __getitem__ returns (image, target) tuple."""
+        from codetr.data.transforms import Compose, ToTensor
+        
+        # Use transforms to get Tensor output
+        transforms = Compose([ToTensor()])
         dataset = YOLODataset(
             data_root=str(sample_dataset),
             split='train',
+            transforms=transforms,
         )
         
         image, target = dataset[0]
         
-        # Image should be tensor
+        # Image should be tensor after ToTensor transform
         assert isinstance(image, torch.Tensor)
         assert image.dim() == 3  # (C, H, W)
         
