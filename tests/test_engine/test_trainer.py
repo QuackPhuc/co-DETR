@@ -300,11 +300,13 @@ class TestTrainerResumeAndValidation:
 
             assert new_trainer.current_epoch == 0
 
-            # Load checkpoint (should restore epoch to 5)
+            # Load checkpoint
             new_trainer.load_checkpoint(str(checkpoint_path))
 
-            # Epoch should be restored
-            assert new_trainer.current_epoch == 5
+            # Epoch should be restored to saved_epoch + 1 (resume from next epoch)
+            # Saved epoch was 5, so after load it should be 6
+            assert new_trainer.current_epoch == 6
+
 
     def test_validation_method_exists_and_returns_metrics(self):
         """Test validate() method exists and returns metrics dictionary."""
