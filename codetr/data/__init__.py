@@ -28,8 +28,8 @@ from .transforms import (
     Resize,
     RandomHorizontalFlip,
     Pad,
+    make_coco_transforms,
 )
-from .transforms.transforms import make_coco_transforms
 from .dataloader import collate_fn, build_dataloader, build_val_dataloader
 
 __all__ = [
