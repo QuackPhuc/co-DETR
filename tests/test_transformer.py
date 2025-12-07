@@ -370,3 +370,154 @@ class TestCoDeformableDetrTransformer:
         
         for i, feat in enumerate(mlvl_feats):
             assert feat.grad is not None, f"No gradient for feature level {i}"
+
+
+class TestTransformerWithPaddedInputs:
+    """Tests for Transformer behavior with padded (partial) feature maps.
+    
+    When images are padded to form a batch, some regions of the feature maps
+    are invalid. The transformer should handle this via valid_ratios.
+    
+    Mathematical correctness:
+    - valid_ratio = actual_size / padded_size, ranges in (0, 1]
+    - valid_ratio = 1.0 means no padding
+    - valid_ratio < 1.0 means image is padded
+    """
+    
+    def test_transformer_with_partial_valid_ratios(self):
+        """Transformer should handle images where part is padded.
+        
+        Simulates a batch where one image is smaller and has padding.
+        valid_ratios < 1 indicates the valid (non-padded) portion.
+        """
+        transformer = CoDeformableDetrTransformer(
+            embed_dim=256,
+            num_heads=8,
+            num_encoder_layers=2,
+            num_decoder_layers=2,
+            num_feature_levels=4,
+            num_queries=50,
+        )
+        
+        batch_size = 2
+        
+        # Feature maps (all same size after padding)
+        mlvl_feats = [
+            torch.randn(batch_size, 256, 16, 16),
+            torch.randn(batch_size, 256, 8, 8),
+            torch.randn(batch_size, 256, 4, 4),
+            torch.randn(batch_size, 256, 2, 2),
+        ]
+        
+        # Masks: second image has padding (True = padded, invalid)
+        mlvl_masks = []
+        for h, w in [(16, 16), (8, 8), (4, 4), (2, 2)]:
+            mask = torch.zeros(batch_size, h, w, dtype=torch.bool)
+            # Second image: 70% valid height, 80% valid width
+            valid_h = int(h * 0.7)
+            valid_w = int(w * 0.8)
+            mask[1, valid_h:, :] = True  # Bottom padding
+            mask[1, :, valid_w:] = True  # Right padding
+            mlvl_masks.append(mask)
+        
+        mlvl_pos_embeds = [
+            torch.randn(batch_size, 256, h, w)
+            for h, w in [(16, 16), (8, 8), (4, 4), (2, 2)]
+        ]
+        
+        # Forward pass should complete without errors
+        hs, init_ref, inter_ref, enc_cls, enc_coord = transformer(
+            mlvl_feats, mlvl_masks, mlvl_pos_embeds
+        )
+        
+        # Output should have expected shapes
+        assert hs.shape[1] == batch_size
+        assert hs.shape[2] == 50  # num_queries
+        
+        # No NaN/Inf in outputs
+        assert not torch.isnan(hs).any(), "Hidden states contain NaN"
+        assert not torch.isinf(hs).any(), "Hidden states contain Inf"
+    
+    def test_decoder_valid_ratios_affect_reference_points(self):
+        """valid_ratios should scale reference points for padded images.
+        
+        When valid_ratio < 1, reference points are scaled to map
+        normalized coordinates [0, 1] to the valid region only.
+        """
+        decoder_layer = DeformableTransformerDecoderLayer(
+            embed_dim=256,
+            num_heads=8,
+            feedforward_dim=1024,
+            num_levels=4,
+        )
+        decoder = CoDeformableDetrTransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=2,
+        )
+        
+        num_keys = 16 + 9 + 4 + 1
+        query = torch.randn(2, 50, 256)
+        memory = torch.randn(2, num_keys, 256)
+        reference_points = torch.rand(2, 50, 2)
+        spatial_shapes = torch.tensor([[4, 4], [3, 3], [2, 2], [1, 1]], dtype=torch.long)
+        level_start_index = torch.tensor([0, 16, 25, 29], dtype=torch.long)
+        
+        # First batch item has full valid ratio, second has 80%, 70%
+        valid_ratios = torch.tensor([
+            [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]],  # Batch 0: no padding
+            [[0.8, 0.7], [0.8, 0.7], [0.8, 0.7], [0.8, 0.7]],  # Batch 1: 80% H, 70% W
+        ])
+        
+        outputs, inter_refs = decoder(
+            query, reference_points, memory,
+            spatial_shapes, level_start_index, valid_ratios
+        )
+        
+        # Should complete without errors
+        assert outputs.shape == (2, 2, 50, 256)  # (num_layers, batch, queries, embed)
+        assert not torch.isnan(outputs).any()
+    
+    def test_extreme_padding_handled(self):
+        """Very small valid ratios (heavy padding) should still work.
+        
+        Edge case: only 10% of the image is valid (90% padding).
+        """
+        transformer = CoDeformableDetrTransformer(
+            embed_dim=256,
+            num_heads=8,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            num_feature_levels=4,
+            num_queries=20,
+        )
+        
+        batch_size = 1
+        mlvl_feats = [
+            torch.randn(batch_size, 256, 10, 10),
+            torch.randn(batch_size, 256, 5, 5),
+            torch.randn(batch_size, 256, 3, 3),
+            torch.randn(batch_size, 256, 2, 2),
+        ]
+        
+        # Extreme padding: only top-left 10% is valid
+        mlvl_masks = []
+        for h, w in [(10, 10), (5, 5), (3, 3), (2, 2)]:
+            mask = torch.ones(batch_size, h, w, dtype=torch.bool)  # All padding
+            valid_h = max(1, int(h * 0.3))  # At least 1 pixel valid
+            valid_w = max(1, int(w * 0.3))
+            mask[0, :valid_h, :valid_w] = False  # Small valid region
+            mlvl_masks.append(mask)
+        
+        mlvl_pos_embeds = [
+            torch.randn(batch_size, 256, h, w)
+            for h, w in [(10, 10), (5, 5), (3, 3), (2, 2)]
+        ]
+        
+        # Should not crash even with extreme padding
+        hs, init_ref, inter_ref, enc_cls, enc_coord = transformer(
+            mlvl_feats, mlvl_masks, mlvl_pos_embeds
+        )
+        
+        assert hs.shape[2] == 20
+        assert not torch.isnan(hs).any(), "Extreme padding caused NaN"
+

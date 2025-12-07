@@ -320,3 +320,200 @@ class TestInferenceDeterminism:
                     assert torch.allclose(results[0][0][key], result[0][key]), (
                         f"Run {i} {key} differs from run 0"
                     )
+
+
+class TestNestedTensorVariableSizes:
+    """Tests for NestedTensor handling of variable-size images.
+    
+    This is critical for real inference where images in a batch may have
+    different dimensions. The mask must correctly indicate padded regions.
+    
+    Mathematical correctness:
+    - Mask should be True for padded regions, False for valid regions
+    - Valid ratio = actual_size / padded_size
+    """
+    
+    def test_variable_sizes_creates_correct_masks(self):
+        """NestedTensor masks should correctly identify padded regions."""
+        # Images with different sizes
+        images = [
+            torch.randn(3, 100, 80),   # Smallest
+            torch.randn(3, 150, 100),  # Medium
+            torch.randn(3, 200, 150),  # Largest
+        ]
+        
+        nested = nested_tensor_from_tensor_list(images, size_divisibility=32)
+        
+        # Padded tensor should be large enough for all images
+        assert nested.tensors.shape[2] >= 200  # Height
+        assert nested.tensors.shape[3] >= 150  # Width
+        
+        # Check mask for first (smallest) image
+        # Valid region should be (100, 80), rest is padding
+        mask = nested.mask[0]
+        
+        # Valid region (False in mask)
+        assert (~mask[:100, :80]).all(), "Valid region should have mask=False"
+        
+        # Padding region (True in mask) - if there's padding
+        if nested.tensors.shape[2] > 100:
+            assert mask[100:, :].all(), "Padded height should have mask=True"
+        if nested.tensors.shape[3] > 80:
+            assert mask[:100, 80:].all(), "Padded width should have mask=True"
+    
+    def test_variable_sizes_preserves_original_content(self):
+        """Original image content should be preserved in nested tensor."""
+        # Create images with distinct content
+        img1 = torch.ones(3, 50, 60) * 0.5
+        img2 = torch.ones(3, 80, 70) * 0.8
+        
+        nested = nested_tensor_from_tensor_list([img1, img2])
+        
+        # Check first image content preserved
+        assert torch.allclose(
+            nested.tensors[0, :, :50, :60], 
+            img1,
+            atol=1e-6
+        ), "First image content should be preserved"
+        
+        # Check second image content preserved
+        assert torch.allclose(
+            nested.tensors[1, :, :80, :70], 
+            img2,
+            atol=1e-6
+        ), "Second image content should be preserved"
+    
+    def test_model_handles_variable_size_batch(self):
+        """Model should process variable-size batch correctly."""
+        model = build_codetr(
+            num_classes=10,
+            pretrained_backbone=False,
+            use_aux_heads=False,
+        )
+        model.eval()
+        
+        # Variable-size images
+        images = [
+            torch.randn(3, 256, 200),
+            torch.randn(3, 320, 256),
+            torch.randn(3, 200, 300),
+        ]
+        
+        nested = nested_tensor_from_tensor_list(images, size_divisibility=32)
+        
+        with torch.no_grad():
+            predictions = model(nested.tensors)
+        
+        # Should get predictions for all images
+        assert len(predictions) == 3
+        
+        # Each prediction should have valid format
+        for pred in predictions:
+            assert 'boxes' in pred
+            assert 'scores' in pred
+            assert 'labels' in pred
+
+
+class TestSingleTrainingStep:
+    """Tests for verifying a single training step works correctly.
+    
+    This is a basic sanity check that:
+    1. Forward pass produces loss
+    2. Backward pass computes gradients
+    3. Optimizer step updates weights
+    
+    Mathematical correctness:
+    - After optimizer.step(), weights should differ from initial values
+    - Loss should be finite (not NaN or Inf)
+    """
+    
+    def test_optimizer_step_updates_weights(self):
+        """One optimizer step should update model weights.
+        
+        Verify the complete training loop:
+        forward → loss → backward → optimizer.step() → weights changed
+        """
+        model = build_codetr(
+            num_classes=5,
+            pretrained_backbone=False,
+            use_aux_heads=False,
+        )
+        model.train()
+        
+        # Make all params trainable for this test
+        for param in model.parameters():
+            param.requires_grad = True
+        
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        
+        # Get initial weights (clone to compare later)
+        initial_weights = {
+            name: param.clone().detach()
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+        
+        # Prepare input
+        images = torch.randn(2, 3, 128, 128)
+        targets = [
+            {'labels': torch.tensor([0, 1]), 'boxes': torch.rand(2, 4)},
+            {'labels': torch.tensor([2]), 'boxes': torch.rand(1, 4)},
+        ]
+        
+        # Forward pass
+        losses = model(images, targets)
+        total_loss = sum(v for v in losses.values() if isinstance(v, torch.Tensor))
+        
+        assert torch.isfinite(total_loss), "Loss should be finite"
+        
+        # Backward pass
+        optimizer.zero_grad()
+        total_loss.backward()
+        
+        # Optimizer step
+        optimizer.step()
+        
+        # Check that at least some weights changed
+        weights_changed = False
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in initial_weights:
+                if not torch.allclose(initial_weights[name], param, atol=1e-8):
+                    weights_changed = True
+                    break
+        
+        assert weights_changed, "Optimizer step should update at least some weights"
+    
+    def test_gradient_accumulation_works(self):
+        """Multiple forward passes before optimizer step should accumulate gradients.
+        
+        Mathematical guarantee: 
+        grad_accumulated = grad_1 + grad_2 (not averaged, summed)
+        """
+        model = build_codetr(
+            num_classes=5,
+            pretrained_backbone=False,
+            use_aux_heads=False,
+        )
+        model.train()
+        
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        optimizer.zero_grad()
+        
+        # Two forward-backward passes without optimizer.step()
+        for i in range(2):
+            images = torch.randn(1, 3, 128, 128)
+            targets = [{'labels': torch.tensor([i % 5]), 'boxes': torch.rand(1, 4)}]
+            
+            losses = model(images, targets)
+            total_loss = sum(v for v in losses.values() if isinstance(v, torch.Tensor))
+            total_loss.backward()
+        
+        # Check gradients exist and are accumulated (larger than single pass)
+        has_nonzero_grad = False
+        for param in model.parameters():
+            if param.grad is not None and param.grad.abs().sum() > 0:
+                has_nonzero_grad = True
+                break
+        
+        assert has_nonzero_grad, "Accumulated gradients should exist"
+

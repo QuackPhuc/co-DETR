@@ -345,3 +345,89 @@ class TestYOLODatasetRobustEdgeCases:
         except (ValueError, IndexError):
             # Raising a clear error is also acceptable
             pass
+
+
+class TestYOLODatasetGrayscaleImage:
+    """Tests for handling grayscale (1-channel) images.
+    
+    Real datasets may contain grayscale images, which need to be converted
+    to RGB (3-channel) before being processed by the model.
+    
+    Mathematical correctness:
+    - Grayscale to RGB: R = G = B = Gray value
+    - Shape transformation: (H, W) -> (3, H, W) for tensors
+    """
+    
+    @pytest.fixture
+    def grayscale_dataset(self, tmp_path):
+        """Create dataset with a grayscale image."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        from PIL import Image
+        # Create grayscale image (mode 'L' = 8-bit luminance)
+        img = Image.new('L', (100, 100), color=128)
+        img.save(images_dir / "grayscale.jpg")
+        
+        with open(labels_dir / "grayscale.txt", 'w') as f:
+            f.write("0 0.5 0.5 0.2 0.2\n")
+        
+        return tmp_path
+    
+    def test_grayscale_image_converted_to_rgb(self, grayscale_dataset):
+        """Grayscale images should be converted to 3-channel RGB.
+        
+        The dataset uses PIL's .convert('RGB') which replicates the
+        grayscale channel across R, G, and B.
+        """
+        from codetr.data.transforms import Compose, ToTensor
+        
+        transforms = Compose([ToTensor()])
+        dataset = YOLODataset(
+            data_root=str(grayscale_dataset),
+            split='train',
+            transforms=transforms,
+        )
+        
+        image, target = dataset[0]
+        
+        # Image should have 3 channels after conversion
+        assert image.shape[0] == 3, f"Expected 3 channels, got {image.shape[0]}"
+        # All channels should have same values (R=G=B for grayscale)
+        assert torch.allclose(image[0], image[1], atol=1e-5)
+        assert torch.allclose(image[1], image[2], atol=1e-5)
+    
+    def test_grayscale_rgba_image_handled(self, tmp_path):
+        """Test RGBA images (4-channel with alpha) are handled correctly.
+        
+        Some image formats support transparency, which should be dropped
+        when converting to RGB.
+        """
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        from PIL import Image
+        # Create RGBA image (4-channel with alpha)
+        img = Image.new('RGBA', (100, 100), color=(255, 0, 0, 128))
+        img.save(images_dir / "rgba.png")
+        
+        with open(labels_dir / "rgba.txt", 'w') as f:
+            f.write("0 0.5 0.5 0.2 0.2\n")
+        
+        from codetr.data.transforms import Compose, ToTensor
+        
+        transforms = Compose([ToTensor()])
+        dataset = YOLODataset(
+            data_root=str(tmp_path),
+            split='train',
+            transforms=transforms,
+        )
+        
+        image, _ = dataset[0]
+        
+        # Should have exactly 3 channels (alpha dropped)
+        assert image.shape[0] == 3, f"Expected 3 channels, got {image.shape[0]}"
