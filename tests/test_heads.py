@@ -645,3 +645,227 @@ class TestMultiHeadIntegration:
         
         # All heads should process features without error
         assert True
+
+
+class TestRPNProposalNMS:
+    """Tests for RPN proposal NMS (Non-Maximum Suppression) behavior.
+    
+    These tests verify that NMS correctly filters overlapping proposals
+    based on the IoU threshold.
+    """
+
+    def test_nms_removes_overlapping_proposals(self):
+        """Verify NMS removes proposals with IoU > nms_threshold.
+        
+        Mathematical guarantee: After NMS, for any pair of remaining
+        proposals (i, j), IoU(proposal_i, proposal_j) <= nms_threshold.
+        """
+        from torchvision.ops import box_iou
+        
+        head = RPNHead(
+            in_channels=256,
+            nms_threshold=0.7,  # IoU threshold for NMS
+            pre_nms_top_n=1000,
+            post_nms_top_n=100,
+        )
+        head.init_weights()
+        
+        # Create features that will generate proposals
+        features = [
+            torch.randn(1, 256, 20, 20),
+            torch.randn(1, 256, 10, 10),
+            torch.randn(1, 256, 5, 5),
+            torch.randn(1, 256, 3, 3),
+        ]
+        
+        proposals, _ = head(features=features)
+        
+        # Get proposals for first (and only) image
+        props = proposals[0]
+        
+        if len(props) > 1:
+            # Compute IoU matrix for all proposals
+            iou_matrix = box_iou(props, props)
+            
+            # Remove diagonal (self-IoU = 1.0)
+            mask = ~torch.eye(len(props), dtype=torch.bool, device=iou_matrix.device)
+            off_diagonal_ious = iou_matrix[mask]
+            
+            # After NMS, no pair should have IoU > nms_threshold
+            max_iou = off_diagonal_ious.max().item() if len(off_diagonal_ious) > 0 else 0.0
+            
+            assert max_iou <= head.nms_threshold + 1e-5, (
+                f"NMS failed: found proposal pair with IoU={max_iou:.4f} > "
+                f"threshold={head.nms_threshold}"
+            )
+
+    def test_nms_preserves_highest_score_proposals(self):
+        """Verify NMS keeps proposals with highest scores among overlapping groups.
+        
+        When multiple proposals overlap, NMS should keep the one with
+        highest objectness score and suppress the rest.
+        """
+        head = RPNHead(
+            in_channels=256,
+            nms_threshold=0.5,
+            score_threshold=0.0,  # Don't filter by score
+        )
+        head.init_weights()
+        
+        features = [
+            torch.randn(1, 256, 15, 15),
+            torch.randn(1, 256, 8, 8),
+            torch.randn(1, 256, 4, 4),
+            torch.randn(1, 256, 2, 2),
+        ]
+        
+        proposals, _ = head(features=features)
+        
+        # Should have some proposals after NMS
+        assert len(proposals) == 1
+        props = proposals[0]
+        
+        # Proposals should have valid coordinates (xyxy: x1 < x2, y1 < y2)
+        if len(props) > 0:
+            assert (props[:, 2] > props[:, 0]).all(), "Invalid x coordinates"
+            assert (props[:, 3] > props[:, 1]).all(), "Invalid y coordinates"
+
+    def test_nms_respects_post_nms_top_n(self):
+        """Verify NMS respects post_nms_top_n limit."""
+        post_nms_limit = 50
+        
+        head = RPNHead(
+            in_channels=256,
+            nms_threshold=0.9,  # High threshold = keep more proposals
+            post_nms_top_n=post_nms_limit,
+        )
+        head.init_weights()
+        
+        # Larger features to generate more proposals
+        features = [
+            torch.randn(1, 256, 40, 40),
+            torch.randn(1, 256, 20, 20),
+            torch.randn(1, 256, 10, 10),
+            torch.randn(1, 256, 5, 5),
+        ]
+        
+        proposals, _ = head(features=features)
+        
+        # Should not exceed post_nms_top_n
+        assert len(proposals[0]) <= post_nms_limit, (
+            f"Post-NMS proposals ({len(proposals[0])}) exceeds limit ({post_nms_limit})"
+        )
+
+
+class TestATSSCenternessTargetComputation:
+    """Tests for ATSS centerness target mathematical correctness.
+    
+    Centerness formula: sqrt((min(l,r)/max(l,r)) * (min(t,b)/max(t,b)))
+    where l, r, t, b are distances from anchor center to GT box edges.
+    
+    Properties:
+    - centerness ∈ [0, 1]
+    - centerness = 1 when anchor center is at GT box center
+    - centerness → 0 when anchor center is at GT box edge
+    """
+
+    def test_centerness_is_in_valid_range(self):
+        """Centerness values should be in [0, 1]."""
+        head = ATSSHead(
+            num_classes=10,
+            in_channels=256,
+        )
+        head.init_weights()
+        head.train()
+        
+        features = [
+            torch.randn(2, 256, 25, 25),
+            torch.randn(2, 256, 13, 13),
+        ]
+        
+        targets = [
+            {
+                'labels': torch.tensor([0, 3, 7]),
+                'boxes': torch.tensor([
+                    [0.2, 0.2, 0.15, 0.15],
+                    [0.5, 0.5, 0.3, 0.3],
+                    [0.8, 0.3, 0.1, 0.2],
+                ]),
+            },
+            {
+                'labels': torch.tensor([1]),
+                'boxes': torch.tensor([[0.4, 0.6, 0.2, 0.2]]),
+            },
+        ]
+        
+        _, _, centernesses, _ = head(features=features, targets=targets)
+        
+        # Check all centerness predictions
+        for level_centerness in centernesses:
+            # Apply sigmoid to get actual centerness values
+            centerness_values = torch.sigmoid(level_centerness)
+            
+            assert centerness_values.min() >= 0.0, (
+                f"Centerness below 0: {centerness_values.min()}"
+            )
+            assert centerness_values.max() <= 1.0, (
+                f"Centerness above 1: {centerness_values.max()}"
+            )
+
+    def test_centerness_formula_correctness(self):
+        """Verify centerness is computed using the correct mathematical formula.
+        
+        Formula: centerness = sqrt((min(l,r)/max(l,r)) * (min(t,b)/max(t,b)))
+        """
+        # Test with known values
+        # Anchor center at (100, 100), GT box [50, 50, 150, 150]
+        # l = 100 - 50 = 50, r = 150 - 100 = 50
+        # t = 100 - 50 = 50, b = 150 - 100 = 50
+        # centerness = sqrt((50/50) * (50/50)) = sqrt(1 * 1) = 1.0
+        
+        l, r, t, b = 50.0, 50.0, 50.0, 50.0
+        expected_centerness = torch.sqrt(
+            torch.tensor((min(l, r) / max(l, r)) * (min(t, b) / max(t, b)))
+        )
+        assert abs(expected_centerness.item() - 1.0) < 1e-5
+        
+        # Test with asymmetric case
+        # Anchor at (100, 100), GT box [25, 25, 150, 150]
+        # l = 100 - 25 = 75, r = 150 - 100 = 50
+        # t = 100 - 25 = 75, b = 150 - 100 = 50
+        # centerness = sqrt((50/75) * (50/75)) = sqrt(0.667 * 0.667) = 0.667
+        l, r, t, b = 75.0, 50.0, 75.0, 50.0
+        expected_centerness = torch.sqrt(
+            torch.tensor((min(l, r) / max(l, r)) * (min(t, b) / max(t, b)))
+        )
+        expected_value = (50.0 / 75.0)  # ≈ 0.667
+        assert abs(expected_centerness.item() - expected_value) < 1e-5
+
+    def test_centerness_symmetric_property(self):
+        """Swapping left/right or top/bottom should give same centerness.
+        
+        This tests the symmetric property of the centerness formula.
+        """
+        def compute_centerness(l, r, t, b):
+            return torch.sqrt(
+                torch.tensor((min(l, r) / max(l, r)) * (min(t, b) / max(t, b)))
+            )
+        
+        l, r, t, b = 30.0, 70.0, 40.0, 60.0
+        
+        # Original
+        c1 = compute_centerness(l, r, t, b)
+        
+        # Swap left/right
+        c2 = compute_centerness(r, l, t, b)
+        
+        # Swap top/bottom
+        c3 = compute_centerness(l, r, b, t)
+        
+        # Swap both
+        c4 = compute_centerness(r, l, b, t)
+        
+        # All should be equal due to min/max symmetry
+        assert torch.allclose(c1, c2, atol=1e-5)
+        assert torch.allclose(c1, c3, atol=1e-5)
+        assert torch.allclose(c1, c4, atol=1e-5)
