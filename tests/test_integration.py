@@ -208,3 +208,115 @@ class TestModelOutputConsistency:
             assert p1['boxes'].shape == p2['boxes'].shape
             assert p1['scores'].shape == p2['scores'].shape
             assert p1['labels'].shape == p2['labels'].shape
+
+
+class TestCheckpointConsistency:
+    """Tests for checkpoint save/load consistency.
+    
+    These tests verify that model state is preserved correctly when
+    saving and loading checkpoints.
+    """
+
+    def test_checkpoint_save_load_weights_match(self):
+        """Save → Load should produce identical model weights.
+        
+        This is critical for training resume to work correctly.
+        """
+        import tempfile
+        from pathlib import Path
+
+        # Create model
+        model1 = build_codetr(
+            num_classes=10,
+            pretrained_backbone=False,
+            use_aux_heads=False,
+        )
+
+        # Get original weights
+        original_state = {k: v.clone() for k, v in model1.state_dict().items()}
+
+        # Save checkpoint
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ckpt_path = Path(tmpdir) / "test_checkpoint.pth"
+            torch.save({
+                'model_state_dict': model1.state_dict(),
+                'epoch': 5,
+            }, ckpt_path)
+
+            # Create new model
+            model2 = build_codetr(
+                num_classes=10,
+                pretrained_backbone=False,
+                use_aux_heads=False,
+            )
+
+            # Load checkpoint
+            ckpt = torch.load(ckpt_path, weights_only=False)
+            model2.load_state_dict(ckpt['model_state_dict'])
+
+            # Verify weights match
+            for key in original_state:
+                assert torch.allclose(
+                    original_state[key], 
+                    model2.state_dict()[key],
+                    atol=1e-6
+                ), f"Weight mismatch for {key}"
+
+            # Verify metadata
+            assert ckpt['epoch'] == 5
+
+
+class TestInferenceDeterminism:
+    """Tests for inference determinism and reproducibility."""
+
+    def test_inference_deterministic_same_input(self):
+        """Same input should produce identical outputs in eval mode.
+        
+        This verifies no randomness leaks in during inference.
+        """
+        model = build_codetr(
+            num_classes=10,
+            pretrained_backbone=False,
+            use_aux_heads=False,
+        )
+        model.eval()
+
+        # Fixed input
+        torch.manual_seed(42)
+        images = torch.randn(2, 3, 256, 256)
+
+        with torch.no_grad():
+            pred1 = model(images)
+            pred2 = model(images)
+
+        # Outputs should be identical (not just same shape)
+        for p1, p2 in zip(pred1, pred2):
+            assert torch.allclose(p1['boxes'], p2['boxes']), "Boxes should be identical"
+            assert torch.allclose(p1['scores'], p2['scores']), "Scores should be identical"
+            assert torch.equal(p1['labels'], p2['labels']), "Labels should be identical"
+
+    def test_eval_mode_disables_dropout(self):
+        """Model in eval mode should have no stochastic behavior."""
+        model = build_codetr(
+            num_classes=5,
+            pretrained_backbone=False,
+        )
+        model.eval()
+
+        images = torch.randn(1, 3, 128, 128)
+
+        # Run multiple times, should all be identical
+        with torch.no_grad():
+            results = [model(images) for _ in range(3)]
+
+        # All results should match the first
+        for i, result in enumerate(results[1:], 1):
+            for key in ['boxes', 'scores', 'labels']:
+                if key == 'labels':
+                    assert torch.equal(results[0][0][key], result[0][key]), (
+                        f"Run {i} {key} differs from run 0"
+                    )
+                else:
+                    assert torch.allclose(results[0][0][key], result[0][key]), (
+                        f"Run {i} {key} differs from run 0"
+                    )

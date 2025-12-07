@@ -176,6 +176,77 @@ class TestRPNHead:
         assert features[0].grad is not None
 
 
+class TestRPNBoxEncodingDecoding:
+    """Tests for RPN box encoding and decoding logic.
+    
+    These tests verify the mathematical correctness of the box encoding scheme
+    which is critical for proposal generation.
+    """
+
+    def test_box_encode_decode_roundtrip(self):
+        """Encode → decode should return boxes close to original.
+        
+        Mathematical guarantee: Given anchors A and GT boxes B,
+        encode(A, B) produces deltas D, then decode(A, D) should ≈ B.
+        """
+        head = RPNHead(in_channels=256)
+
+        # Create anchors in xyxy format
+        anchors = torch.tensor([
+            [10.0, 10.0, 50.0, 50.0],   # 40x40 anchor
+            [100.0, 100.0, 200.0, 200.0],  # 100x100 anchor
+            [50.0, 25.0, 150.0, 125.0],  # 100x100 anchor, different position
+        ])
+
+        # Create GT boxes slightly different from anchors
+        gt_boxes = torch.tensor([
+            [15.0, 12.0, 55.0, 52.0],   # Shifted and slightly larger
+            [110.0, 95.0, 210.0, 195.0],  # Shifted
+            [40.0, 30.0, 160.0, 130.0],  # Shifted and resized
+        ])
+
+        # Encode: gt_boxes relative to anchors
+        deltas = head.encode_boxes(anchors=anchors, gt_boxes=gt_boxes)
+
+        # Decode: should recover gt_boxes from anchors + deltas  
+        recovered_boxes = head.decode_boxes(anchors=anchors, deltas=deltas)
+
+        # Roundtrip error should be minimal (floating point precision)
+        assert torch.allclose(recovered_boxes, gt_boxes, atol=1e-4), (
+            f"Roundtrip error too large:\n"
+            f"Original: {gt_boxes}\n"
+            f"Recovered: {recovered_boxes}\n"
+            f"Diff: {(recovered_boxes - gt_boxes).abs().max()}"
+        )
+
+    def test_box_encoding_delta_values_reasonable(self):
+        """Encoded deltas should have reasonable values for typical boxes."""
+        head = RPNHead(in_channels=256)
+
+        anchors = torch.tensor([
+            [100.0, 100.0, 200.0, 200.0],  # 100x100 anchor at (150, 150)
+        ])
+
+        # GT box with small shift (10 pixels) and no scale change
+        gt_boxes = torch.tensor([
+            [110.0, 105.0, 210.0, 205.0],  # Shifted by (10, 5)
+        ])
+
+        deltas = head.encode_boxes(anchors=anchors, gt_boxes=gt_boxes)
+
+        # dx, dy should be small (shift / anchor_size)
+        dx, dy, dw, dh = deltas[0].tolist()
+
+        # dx = (gt_cx - anchor_cx) / anchor_w = (160-150)/100 = 0.1
+        assert abs(dx - 0.1) < 0.01, f"dx should be ~0.1, got {dx}"
+        # dy = (gt_cy - anchor_cy) / anchor_h = (155-150)/100 = 0.05
+        assert abs(dy - 0.05) < 0.01, f"dy should be ~0.05, got {dy}"
+        # dw = log(gt_w / anchor_w) = log(100/100) = 0
+        assert abs(dw) < 0.01, f"dw should be ~0, got {dw}"
+        # dh = log(gt_h / anchor_h) = log(100/100) = 0
+        assert abs(dh) < 0.01, f"dh should be ~0, got {dh}"
+
+
 class TestRoIHead:
     """Tests for RoI (Region of Interest) head."""
     

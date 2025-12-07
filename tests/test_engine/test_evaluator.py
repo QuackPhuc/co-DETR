@@ -252,3 +252,128 @@ class TestBuildEvaluator:
         )
         
         assert len(evaluator.iou_thresholds) == 2
+
+
+class TestEvaluatorMultiImage:
+    """Tests for evaluator with multiple images.
+    
+    These tests verify the evaluator correctly accumulates predictions
+    across many images and computes per-class AP correctly.
+    """
+
+    def test_evaluator_with_many_images(self):
+        """Test evaluator handles 20+ images correctly.
+        
+        This verifies the accumulation logic works for realistic batch counts.
+        """
+        evaluator = DetectionEvaluator(num_classes=5)
+
+        # Add 25 images worth of predictions
+        for img_idx in range(25):
+            # Create 2-5 predictions per image
+            num_preds = (img_idx % 4) + 2
+            num_gts = (img_idx % 3) + 1
+
+            pred_boxes = torch.rand(num_preds, 4) * 100
+            pred_boxes[:, 2:] = pred_boxes[:, :2] + 20  # Ensure valid xyxy
+
+            gt_boxes = torch.rand(num_gts, 4) * 100
+            gt_boxes[:, 2:] = gt_boxes[:, :2] + 20
+
+            predictions = [{
+                'boxes': pred_boxes,
+                'scores': torch.rand(num_preds),
+                'labels': torch.randint(0, 5, (num_preds,)),
+            }]
+
+            targets = [{
+                'boxes': gt_boxes,
+                'labels': torch.randint(0, 5, (num_gts,)),
+            }]
+
+            evaluator.add_predictions(predictions=predictions, targets=targets)
+
+        # Should have accumulated all images
+        assert len(evaluator.predictions) == 25
+        assert len(evaluator.ground_truths) == 25
+
+        # Should compute metrics without error
+        metrics = evaluator.compute_metrics()
+        assert 'mAP' in metrics
+        assert 0 <= metrics['mAP'] <= 1
+
+    def test_per_class_ap_computation(self):
+        """Verify per-class AP is computed correctly.
+        
+        Class 0 should have higher AP than class 1 when class 0 predictions
+        are more accurate.
+        """
+        evaluator = DetectionEvaluator(num_classes=3)
+
+        # Class 0: Perfect predictions (exact match)
+        predictions_class0 = [{
+            'boxes': torch.tensor([[10.0, 10.0, 50.0, 50.0]]),
+            'scores': torch.tensor([0.99]),
+            'labels': torch.tensor([0]),
+        }]
+        targets_class0 = [{
+            'boxes': torch.tensor([[10.0, 10.0, 50.0, 50.0]]),
+            'labels': torch.tensor([0]),
+        }]
+
+        # Class 1: Wrong predictions (no overlap)
+        predictions_class1 = [{
+            'boxes': torch.tensor([[100.0, 100.0, 150.0, 150.0]]),
+            'scores': torch.tensor([0.95]),
+            'labels': torch.tensor([1]),
+        }]
+        targets_class1 = [{
+            'boxes': torch.tensor([[10.0, 10.0, 50.0, 50.0]]),
+            'labels': torch.tensor([1]),
+        }]
+
+        evaluator.add_predictions(predictions=predictions_class0, targets=targets_class0)
+        evaluator.add_predictions(predictions=predictions_class1, targets=targets_class1)
+
+        metrics = evaluator.compute_metrics()
+
+        # Should have per-class AP in metrics
+        assert 'AP_per_class' in metrics
+        # Class 0 should have high AP (perfect match)
+        # Class 1 should have low AP (no match)
+        per_class_ap = metrics['AP_per_class']
+        assert per_class_ap[0] > per_class_ap[1], (
+            f"Class 0 AP ({per_class_ap[0]}) should > Class 1 AP ({per_class_ap[1]})"
+        )
+
+    def test_all_false_positives_ap_zero(self):
+        """All predictions wrong class → AP should be ~0.
+        
+        Mathematical guarantee: If no true positives, precision = 0 → AP = 0.
+        """
+        evaluator = DetectionEvaluator(num_classes=3)
+
+        # Predictions all class 0
+        predictions = [{
+            'boxes': torch.tensor([
+                [10.0, 10.0, 50.0, 50.0],
+                [60.0, 60.0, 100.0, 100.0],
+            ]),
+            'scores': torch.tensor([0.9, 0.8]),
+            'labels': torch.tensor([0, 0]),  # All class 0
+        }]
+
+        # But GT is all class 1
+        targets = [{
+            'boxes': torch.tensor([
+                [10.0, 10.0, 50.0, 50.0],
+                [60.0, 60.0, 100.0, 100.0],
+            ]),
+            'labels': torch.tensor([1, 1]),  # All class 1
+        }]
+
+        evaluator.add_predictions(predictions=predictions, targets=targets)
+        metrics = evaluator.compute_metrics()
+
+        # mAP should be very low (all predictions are false positives)
+        assert metrics['mAP'] < 0.1, f"mAP should be ~0, got {metrics['mAP']}"
