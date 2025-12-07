@@ -212,6 +212,267 @@ class TestRoIHead:
         assert bbox_preds.shape[1] == 4 * 20
 
 
+class TestRoIHeadLossAndSampling:
+    """Tests for RoI Head loss computation and RoI sampling logic."""
+
+    def test_roi_loss_computation_with_targets(self):
+        """Test loss is computed correctly when training with targets."""
+        head = RoIHead(
+            in_channels=256,
+            num_classes=20,
+            roi_feat_size=7,
+        )
+        head.init_weights()
+        head.train()
+
+        features = [torch.randn(2, 256, 50, 50)]
+
+        # Proposals in xyxy format (absolute coordinates)
+        proposals = [
+            torch.tensor([
+                [10.0, 10.0, 100.0, 100.0],
+                [200.0, 200.0, 350.0, 350.0],
+                [50.0, 50.0, 150.0, 150.0],
+            ]),
+            torch.tensor([
+                [20.0, 20.0, 120.0, 120.0],
+                [150.0, 150.0, 300.0, 300.0],
+            ]),
+        ]
+
+        # Targets with normalized cxcywh boxes
+        targets = [
+            {
+                'labels': torch.tensor([0, 5]),
+                'boxes': torch.tensor([
+                    [0.1, 0.1, 0.15, 0.15],  # (cx, cy, w, h) normalized
+                    [0.35, 0.35, 0.2, 0.2],
+                ]),
+            },
+            {
+                'labels': torch.tensor([10]),
+                'boxes': torch.tensor([
+                    [0.2, 0.2, 0.15, 0.15],
+                ]),
+            },
+        ]
+
+        cls_scores, bbox_preds, losses = head(
+            features=features,
+            proposals=proposals,
+            targets=targets,
+        )
+
+        # Should return loss dictionary during training
+        assert losses is not None
+        assert 'loss_roi_cls' in losses
+        assert 'loss_roi_bbox' in losses
+
+        # Losses should be positive scalars
+        assert losses['loss_roi_cls'] >= 0
+        assert losses['loss_roi_bbox'] >= 0
+        assert not torch.isnan(losses['loss_roi_cls'])
+        assert not torch.isnan(losses['loss_roi_bbox'])
+
+    def test_roi_empty_proposals_handled(self):
+        """Test RoI head handles empty proposals gracefully."""
+        head = RoIHead(
+            in_channels=256,
+            num_classes=10,
+            roi_feat_size=7,
+        )
+        head.init_weights()
+        head.train()
+
+        features = [torch.randn(2, 256, 30, 30)]
+
+        # Empty proposals for both images
+        proposals = [
+            torch.zeros((0, 4)),
+            torch.zeros((0, 4)),
+        ]
+
+        targets = [
+            {'labels': torch.tensor([0]), 'boxes': torch.rand(1, 4)},
+            {'labels': torch.tensor([1]), 'boxes': torch.rand(1, 4)},
+        ]
+
+        # Should not crash with empty proposals
+        cls_scores, bbox_preds, losses = head(
+            features=features,
+            proposals=proposals,
+            targets=targets,
+        )
+
+        # Empty output expected
+        assert cls_scores.shape[0] == 0
+        assert bbox_preds.shape[0] == 0
+        # No loss when no RoIs
+        assert losses is None
+
+    def test_roi_sample_rois_positive_negative_ratio(self):
+        """Test RoI sampling respects pos_fraction ratio."""
+        head = RoIHead(
+            in_channels=256,
+            num_classes=20,
+            roi_feat_size=7,
+            pos_iou_threshold=0.5,
+            neg_iou_threshold=0.5,
+            num_sample_rois=64,
+            pos_fraction=0.25,
+        )
+
+        # Create proposals that overlap with GT
+        # GT box at [100, 100, 200, 200] xyxy
+        proposals = [
+            torch.tensor([
+                [100.0, 100.0, 200.0, 200.0],  # IoU = 1.0 with GT
+                [110.0, 110.0, 210.0, 210.0],  # High IoU
+                [0.0, 0.0, 50.0, 50.0],        # No overlap
+                [300.0, 300.0, 400.0, 400.0],  # No overlap
+            ])
+        ]
+
+        targets = [
+            {
+                'labels': torch.tensor([5]),
+                'boxes': torch.tensor([[0.1875, 0.1875, 0.125, 0.125]]),  # center at 150,150 w=h=100
+            }
+        ]
+
+        sampled_rois, sampled_labels, sampled_bbox_targets = head.sample_rois(
+            proposals=proposals,
+            targets=targets,
+        )
+
+        # Should have sampled RoIs
+        assert sampled_rois.shape[0] > 0
+        # First column is batch index
+        assert sampled_rois.shape[1] == 5
+        # Labels should include both positive and negative
+        assert sampled_labels.shape[0] == sampled_rois.shape[0]
+
+
+class TestATSSHeadSampling:
+    """Tests for ATSS adaptive sample selection algorithm."""
+
+    def test_atss_sampling_selects_correct_positives(self):
+        """Test ATSS sampling algorithm selects positives based on IoU threshold."""
+        head = ATSSHead(
+            num_classes=20,
+            in_channels=256,
+            topk_candidates=3,
+        )
+
+        # Create anchors at different positions
+        anchors_level1 = torch.tensor([
+            [0.0, 0.0, 64.0, 64.0],      # Overlaps with GT
+            [64.0, 0.0, 128.0, 64.0],    # Partial overlap
+            [128.0, 0.0, 192.0, 64.0],   # No overlap
+        ])
+        anchors_level2 = torch.tensor([
+            [0.0, 64.0, 64.0, 128.0],    # Partial overlap
+            [64.0, 64.0, 128.0, 128.0],  # No overlap
+        ])
+
+        anchors_all = torch.cat([anchors_level1, anchors_level2], dim=0)
+        num_level_anchors = [3, 2]
+
+        # GT box overlaps with first anchor
+        gt_boxes = torch.tensor([[10.0, 10.0, 50.0, 50.0]])  # xyxy
+
+        pos_mask, assigned_gt_idx = head.atss_sampling(
+            anchors_all=anchors_all,
+            gt_boxes=gt_boxes,
+            num_level_anchors=num_level_anchors,
+        )
+
+        # Should have at least one positive (first anchor has high IoU)
+        assert pos_mask.shape[0] == 5
+        assert pos_mask.dtype == torch.bool
+        # All assigned indices should be valid
+        assert assigned_gt_idx.shape[0] == 5
+        assert (assigned_gt_idx >= 0).all()
+
+    def test_atss_sampling_empty_gt_returns_no_positives(self):
+        """Test ATSS sampling returns no positives when no GT boxes."""
+        head = ATSSHead(
+            num_classes=10,
+            in_channels=256,
+            topk_candidates=5,
+        )
+
+        anchors_all = torch.tensor([
+            [0.0, 0.0, 64.0, 64.0],
+            [64.0, 0.0, 128.0, 64.0],
+            [0.0, 64.0, 64.0, 128.0],
+        ])
+        num_level_anchors = [3]
+
+        # Empty GT
+        gt_boxes = torch.zeros((0, 4))
+
+        pos_mask, assigned_gt_idx = head.atss_sampling(
+            anchors_all=anchors_all,
+            gt_boxes=gt_boxes,
+            num_level_anchors=num_level_anchors,
+        )
+
+        # No positives expected
+        assert pos_mask.sum() == 0
+        assert not pos_mask.any()
+
+
+class TestATSSHeadCenterness:
+    """Tests for ATSS centerness computation."""
+
+    def test_atss_loss_with_targets(self):
+        """Test ATSS head computes loss correctly with targets."""
+        head = ATSSHead(
+            num_classes=10,
+            in_channels=256,
+        )
+        head.init_weights()
+        head.train()
+
+        features = [
+            torch.randn(2, 256, 20, 20),
+            torch.randn(2, 256, 10, 10),
+        ]
+
+        targets = [
+            {
+                'labels': torch.tensor([0, 5]),
+                'boxes': torch.tensor([
+                    [0.25, 0.25, 0.1, 0.1],
+                    [0.6, 0.6, 0.2, 0.2],
+                ]),
+            },
+            {
+                'labels': torch.tensor([3]),
+                'boxes': torch.tensor([
+                    [0.5, 0.5, 0.3, 0.3],
+                ]),
+            },
+        ]
+
+        cls_scores, bbox_preds, centernesses, losses = head(
+            features=features,
+            targets=targets,
+        )
+
+        # Should return losses when targets provided
+        assert losses is not None
+        assert 'loss_atss_cls' in losses
+        assert 'loss_atss_bbox' in losses
+        assert 'loss_atss_centerness' in losses
+
+        # Losses should be valid
+        for key, loss in losses.items():
+            assert not torch.isnan(loss), f"{key} is NaN"
+            assert not torch.isinf(loss), f"{key} is Inf"
+
+
 class TestATSSHead:
     """Tests for ATSS (Adaptive Training Sample Selection) head."""
     

@@ -260,3 +260,98 @@ class TestTrainerAMP:
         
         # AMP should be disabled when config says False
         assert trainer.use_amp == False
+
+
+class TestTrainerResumeAndValidation:
+    """Tests for checkpoint resume and validation loop."""
+
+    def test_resume_from_checkpoint_restores_epoch(self):
+        """Test resume training correctly restores epoch counter."""
+        model = MockModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        train_loader = create_mock_dataloader()
+
+        trainer = Trainer(
+            model=model,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            device=torch.device('cpu'),
+        )
+
+        # Manually set epoch to simulate training progress
+        trainer.current_epoch = 5
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "checkpoint_epoch5.pth"
+
+            # Save checkpoint (should include epoch=5)
+            trainer.save_checkpoint(str(checkpoint_path))
+
+            # Create new trainer (starts at epoch 0)
+            new_model = MockModel()
+            new_optimizer = torch.optim.Adam(new_model.parameters(), lr=1e-3)
+
+            new_trainer = Trainer(
+                model=new_model,
+                train_loader=train_loader,
+                optimizer=new_optimizer,
+                device=torch.device('cpu'),
+            )
+
+            assert new_trainer.current_epoch == 0
+
+            # Load checkpoint (should restore epoch to 5)
+            new_trainer.load_checkpoint(str(checkpoint_path))
+
+            # Epoch should be restored
+            assert new_trainer.current_epoch == 5
+
+    def test_validation_method_exists_and_returns_metrics(self):
+        """Test validate() method exists and returns metrics dictionary."""
+        model = MockModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        train_loader = create_mock_dataloader()
+        val_loader = create_mock_dataloader(batch_size=2, num_samples=2)
+
+        trainer = Trainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            optimizer=optimizer,
+            device=torch.device('cpu'),
+        )
+
+        # validate() method should exist
+        assert hasattr(trainer, 'validate')
+        assert callable(trainer.validate)
+
+        # Run validation (with MockModel this just does a forward pass)
+        model.eval()
+        with torch.no_grad():
+            metrics = trainer.validate()
+
+        # Should return a dictionary (can be empty or have metrics)
+        assert isinstance(metrics, dict)
+
+    def test_validate_handles_no_val_loader(self):
+        """Test validate() handles case when no val_loader provided."""
+        model = MockModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        train_loader = create_mock_dataloader()
+
+        # Create trainer without val_loader
+        trainer = Trainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=None,
+            optimizer=optimizer,
+            device=torch.device('cpu'),
+        )
+
+        assert trainer.val_loader is None
+
+        # validate() should handle gracefully (return empty or skip)
+        metrics = trainer.validate()
+        # Either returns empty dict or has some default behavior
+        assert metrics is None or isinstance(metrics, dict)
+

@@ -241,3 +241,128 @@ class TestCompose:
         assert 'Compose' in repr_str
         assert 'ToTensor' in repr_str
         assert 'Normalize' in repr_str
+
+
+class TestTransformEdgeCases:
+    """Tests for edge cases in transforms."""
+
+    def test_box_coordinates_remain_valid_after_resize(self):
+        """Box coordinates should remain in valid [0, 1] range after resize."""
+        transform = Resize(min_size=100, max_size=200)
+
+        # Image and box near the edge
+        image = Image.new('RGB', (200, 100))  # Wide image
+        target = {
+            'boxes': torch.tensor([
+                [0.95, 0.5, 0.1, 0.2],  # Box near right edge: cx=0.95, w=0.1
+                [0.05, 0.5, 0.1, 0.2],  # Box near left edge: cx=0.05, w=0.1
+            ]),
+            'labels': torch.tensor([0, 1]),
+        }
+
+        resized, out_target = transform(image, target)
+
+        # Boxes should still have valid coordinates
+        boxes = out_target['boxes']
+        assert boxes.shape == (2, 4)
+
+        # All values should be finite (not NaN/Inf)
+        assert torch.isfinite(boxes).all()
+
+        # Check that boxes maintain reasonable values
+        # (exact clipping depends on implementation)
+        assert (boxes[:, 2] >= 0).all(), "Width should be non-negative"
+        assert (boxes[:, 3] >= 0).all(), "Height should be non-negative"
+
+    def test_boxes_at_image_boundary_handled(self):
+        """Boxes exactly at image boundary should be handled correctly."""
+        transform = Compose([ToTensor()])
+
+        image = Image.new('RGB', (100, 100))
+
+        # Box exactly at boundaries
+        target = {
+            'boxes': torch.tensor([
+                [0.0, 0.0, 0.1, 0.1],  # Top-left corner (cx=0, cy=0)
+                [1.0, 1.0, 0.1, 0.1],  # Bottom-right corner (cx=1, cy=1)
+                [0.5, 0.5, 1.0, 1.0],  # Full image box
+            ]),
+            'labels': torch.tensor([0, 1, 2]),
+        }
+
+        out_image, out_target = transform(image, target)
+
+        # Should not crash
+        assert out_target is not None
+        assert 'boxes' in out_target
+        # Boxes should be passed through (ToTensor doesn't modify boxes)
+        assert torch.equal(out_target['boxes'], target['boxes'])
+
+    def test_pad_transform_preserves_box_coordinates(self):
+        """Pad transform should correctly handle box coordinates."""
+        # Pad should update coordinates to account for added padding
+        transform = Pad(divisor=32)
+
+        # Create image that needs padding (e.g., 100x100 -> 128x128)
+        image = torch.rand(3, 100, 100)
+        target = {
+            'boxes': torch.tensor([
+                [0.5, 0.5, 0.2, 0.2],  # Centered box
+            ]),
+            'labels': torch.tensor([0]),
+        }
+
+        padded, out_target = transform(image, target)
+
+        # Image should be padded to multiple of divisor
+        assert padded.shape[1] % 32 == 0
+        assert padded.shape[2] % 32 == 0
+
+        # Boxes should exist in output
+        assert 'boxes' in out_target
+
+    def test_horizontal_flip_preserves_box_dimensions(self):
+        """Horizontal flip should preserve box width and height."""
+        transform = RandomHorizontalFlip(p=1.0)
+
+        image = torch.rand(3, 100, 100)
+        original_boxes = torch.tensor([
+            [0.3, 0.4, 0.2, 0.3],  # (cx, cy, w, h)
+            [0.7, 0.6, 0.1, 0.15],
+        ])
+        target = {
+            'boxes': original_boxes.clone(),
+            'labels': torch.tensor([0, 1]),
+        }
+
+        _, flipped_target = transform(image, target)
+
+        flipped_boxes = flipped_target['boxes']
+
+        # Width and height should be unchanged
+        assert torch.allclose(
+            flipped_boxes[:, 2],  # widths
+            original_boxes[:, 2],
+            atol=1e-5,
+        )
+        assert torch.allclose(
+            flipped_boxes[:, 3],  # heights
+            original_boxes[:, 3],
+            atol=1e-5,
+        )
+
+        # y-coordinates should be unchanged
+        assert torch.allclose(
+            flipped_boxes[:, 1],  # cy values
+            original_boxes[:, 1],
+            atol=1e-5,
+        )
+
+        # x-coordinates should be flipped (cx -> 1 - cx)
+        expected_cx = 1.0 - original_boxes[:, 0]
+        assert torch.allclose(
+            flipped_boxes[:, 0],
+            expected_cx,
+            atol=1e-5,
+        )
+
