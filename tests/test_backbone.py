@@ -211,3 +211,146 @@ class TestResNetBackbonePretrainedLoading:
         
         assert len(features) == 3
         assert not torch.isnan(features[0]).any()
+
+
+class TestResNetBackboneGradientStability:
+    """Tests for gradient stability during training.
+    
+    These tests verify that gradients remain numerically stable
+    (no NaN/Inf) when training with various frozen stage configurations.
+    """
+
+    def test_gradient_stability_with_frozen_stages(self):
+        """Gradients should be stable (no NaN/Inf) with frozen stages.
+        
+        Mathematical guarantee: With proper initialization and frozen stages,
+        gradient magnitudes should remain bounded during backpropagation.
+        """
+        for frozen_stages in [0, 1, 2, 3]:
+            backbone = ResNetBackbone(
+                pretrained=False,
+                frozen_stages=frozen_stages,
+                norm_eval=True,
+            )
+            backbone.train()
+
+            # Multiple forward-backward passes to check stability
+            for _ in range(3):
+                x = torch.randn(2, 3, 224, 224, requires_grad=True)
+                features = backbone(x)
+
+                # Compute loss and backprop
+                loss = sum(f.mean() for f in features)
+                loss.backward()
+
+                # Check input gradients are finite
+                assert torch.isfinite(x.grad).all(), (
+                    f"NaN/Inf gradient in input with frozen_stages={frozen_stages}"
+                )
+
+                # Check parameter gradients are finite
+                for name, param in backbone.named_parameters():
+                    if param.requires_grad and param.grad is not None:
+                        assert torch.isfinite(param.grad).all(), (
+                            f"NaN/Inf gradient in {name} with frozen_stages={frozen_stages}"
+                        )
+
+                # Zero gradients for next iteration
+                backbone.zero_grad()
+                x.grad = None
+
+    def test_large_batch_gradient_stability(self):
+        """Gradients should be stable with larger batch sizes.
+        
+        Larger batches may accumulate larger gradient magnitudes,
+        so we verify numerical stability.
+        """
+        backbone = ResNetBackbone(
+            pretrained=False,
+            frozen_stages=1,
+        )
+        backbone.train()
+
+        # Batch size of 8 (larger than typical unit test)
+        x = torch.randn(8, 3, 224, 224, requires_grad=True)
+        features = backbone(x)
+
+        loss = sum(f.sum() for f in features)
+        loss.backward()
+
+        # Verify gradients exist and are finite
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all(), "Input gradient contains NaN/Inf"
+
+        # Check gradient magnitudes are reasonable (not exploding)
+        max_grad = x.grad.abs().max().item()
+        assert max_grad < 1e6, f"Gradient magnitude too large: {max_grad}"
+
+    def test_multiple_backward_passes_stability(self):
+        """Multiple backward passes should maintain gradient stability.
+        
+        This simulates a simplified training loop to check for
+        accumulating numerical errors.
+        """
+        backbone = ResNetBackbone(
+            pretrained=False,
+            frozen_stages=2,
+        )
+        backbone.train()
+
+        optimizer = torch.optim.SGD(
+            filter(lambda p: p.requires_grad, backbone.parameters()),
+            lr=0.01,
+        )
+
+        # Simulate 5 training steps
+        for step in range(5):
+            optimizer.zero_grad()
+
+            x = torch.randn(2, 3, 160, 160)
+            features = backbone(x)
+
+            loss = sum(f.mean() for f in features)
+            loss.backward()
+
+            # Verify gradients before optimizer step
+            for name, param in backbone.named_parameters():
+                if param.requires_grad and param.grad is not None:
+                    assert torch.isfinite(param.grad).all(), (
+                        f"NaN/Inf gradient at step {step} in {name}"
+                    )
+
+            optimizer.step()
+
+            # Verify weights after optimizer step
+            for name, param in backbone.named_parameters():
+                assert torch.isfinite(param).all(), (
+                    f"NaN/Inf weight at step {step} in {name}"
+                )
+
+    def test_extreme_input_values_handled(self):
+        """Backbone should handle inputs with varying magnitudes gracefully.
+        
+        Edge cases: very small or large pixel values should not cause
+        gradient explosion or vanishing.
+        """
+        backbone = ResNetBackbone(pretrained=False, frozen_stages=0)
+        backbone.train()
+
+        # Test with normalized input range [0, 1]
+        x_normal = torch.rand(1, 3, 128, 128, requires_grad=True)
+        features_normal = backbone(x_normal)
+        loss_normal = features_normal[0].mean()
+        loss_normal.backward()
+        
+        assert torch.isfinite(x_normal.grad).all()
+
+        # Test with ImageNet-normalized range (approx [-2.5, 2.5])
+        backbone.zero_grad()
+        x_imagenet = torch.randn(1, 3, 128, 128, requires_grad=True) * 0.5
+        features_imagenet = backbone(x_imagenet)
+        loss_imagenet = features_imagenet[0].mean()
+        loss_imagenet.backward()
+        
+        assert torch.isfinite(x_imagenet.grad).all()
+

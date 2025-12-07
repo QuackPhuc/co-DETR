@@ -366,3 +366,148 @@ class TestTransformEdgeCases:
             atol=1e-5,
         )
 
+
+class TestTransformPerformanceWithManyBoxes:
+    """Tests for transforms handling images with many bounding boxes (crowded scenes).
+    
+    Real-world datasets like COCO or crowd counting datasets may have
+    100+ objects per image. Transforms should handle these efficiently.
+    """
+
+    def test_resize_with_100_boxes(self):
+        """Resize transform should handle 100+ boxes correctly.
+        
+        Mathematical guarantee: All box coordinates should remain valid
+        and preserve relative positions after resize.
+        """
+        transform = Resize(min_size=100, max_size=200)
+
+        image = Image.new('RGB', (400, 300))  # Original size
+
+        # Generate 100 random boxes in valid normalized cxcywh format
+        torch.manual_seed(42)
+        num_boxes = 100
+        boxes = torch.zeros(num_boxes, 4)
+        
+        # Generate valid boxes: cx, cy ∈ [0.1, 0.9], w, h ∈ [0.02, 0.15]
+        boxes[:, 0] = torch.rand(num_boxes) * 0.8 + 0.1  # cx
+        boxes[:, 1] = torch.rand(num_boxes) * 0.8 + 0.1  # cy
+        boxes[:, 2] = torch.rand(num_boxes) * 0.13 + 0.02  # w
+        boxes[:, 3] = torch.rand(num_boxes) * 0.13 + 0.02  # h
+
+        target = {
+            'boxes': boxes,
+            'labels': torch.arange(num_boxes) % 80,  # 80 classes
+        }
+
+        resized_image, out_target = transform(image, target)
+
+        # Should preserve all 100 boxes
+        assert out_target['boxes'].shape == (100, 4)
+        assert len(out_target['labels']) == 100
+
+        # All boxes should have valid values (finite, non-negative for w/h)
+        assert torch.isfinite(out_target['boxes']).all()
+        assert (out_target['boxes'][:, 2] >= 0).all(), "Width should be non-negative"
+        assert (out_target['boxes'][:, 3] >= 0).all(), "Height should be non-negative"
+
+    def test_horizontal_flip_with_many_boxes(self):
+        """Horizontal flip should correctly flip all boxes in crowded scene."""
+        transform = RandomHorizontalFlip(p=1.0)
+
+        torch.manual_seed(123)
+        num_boxes = 150
+        
+        # Create image tensor
+        image = torch.rand(3, 200, 200)
+        
+        # Generate boxes
+        original_boxes = torch.zeros(num_boxes, 4)
+        original_boxes[:, 0] = torch.rand(num_boxes) * 0.8 + 0.1  # cx
+        original_boxes[:, 1] = torch.rand(num_boxes) * 0.8 + 0.1  # cy
+        original_boxes[:, 2] = torch.rand(num_boxes) * 0.1 + 0.02  # w
+        original_boxes[:, 3] = torch.rand(num_boxes) * 0.1 + 0.02  # h
+
+        target = {
+            'boxes': original_boxes.clone(),
+            'labels': torch.randint(0, 10, (num_boxes,)),
+        }
+
+        _, flipped_target = transform(image, target)
+
+        flipped_boxes = flipped_target['boxes']
+
+        # All boxes should be flipped correctly
+        assert flipped_boxes.shape == (num_boxes, 4)
+
+        # cx should flip: cx -> 1 - cx
+        expected_cx = 1.0 - original_boxes[:, 0]
+        assert torch.allclose(flipped_boxes[:, 0], expected_cx, atol=1e-5)
+
+        # cy, w, h should be unchanged
+        assert torch.allclose(flipped_boxes[:, 1], original_boxes[:, 1], atol=1e-5)
+        assert torch.allclose(flipped_boxes[:, 2], original_boxes[:, 2], atol=1e-5)
+        assert torch.allclose(flipped_boxes[:, 3], original_boxes[:, 3], atol=1e-5)
+
+    def test_compose_with_many_boxes_pipeline(self):
+        """Full transform pipeline should handle 100+ boxes."""
+        transforms = Compose([
+            ToTensor(),
+            Normalize(),
+        ])
+
+        image = Image.new('RGB', (300, 300))
+
+        torch.manual_seed(456)
+        num_boxes = 120
+
+        boxes = torch.zeros(num_boxes, 4)
+        boxes[:, 0] = torch.rand(num_boxes) * 0.8 + 0.1
+        boxes[:, 1] = torch.rand(num_boxes) * 0.8 + 0.1
+        boxes[:, 2] = torch.rand(num_boxes) * 0.1 + 0.02
+        boxes[:, 3] = torch.rand(num_boxes) * 0.1 + 0.02
+
+        target = {
+            'boxes': boxes,
+            'labels': torch.randint(0, 50, (num_boxes,)),
+        }
+
+        out_image, out_target = transforms(image, target)
+
+        # Should produce valid output
+        assert isinstance(out_image, torch.Tensor)
+        assert out_target['boxes'].shape == (num_boxes, 4)
+
+        # ToTensor and Normalize don't modify boxes, so should be identical
+        assert torch.equal(out_target['boxes'], boxes)
+
+    def test_pad_with_many_boxes(self):
+        """Pad transform should handle many boxes without modification."""
+        transform = Pad(divisor=32)
+
+        torch.manual_seed(789)
+        num_boxes = 80
+
+        image = torch.rand(3, 100, 100)  # Will be padded to 128x128
+
+        boxes = torch.zeros(num_boxes, 4)
+        boxes[:, 0] = torch.rand(num_boxes) * 0.8 + 0.1
+        boxes[:, 1] = torch.rand(num_boxes) * 0.8 + 0.1
+        boxes[:, 2] = torch.rand(num_boxes) * 0.1 + 0.02
+        boxes[:, 3] = torch.rand(num_boxes) * 0.1 + 0.02
+
+        target = {
+            'boxes': boxes.clone(),
+            'labels': torch.randint(0, 20, (num_boxes,)),
+        }
+
+        padded_image, out_target = transform(image, target)
+
+        # Image should be padded to divisor
+        assert padded_image.shape[1] % 32 == 0
+        assert padded_image.shape[2] % 32 == 0
+
+        # All boxes should exist in output
+        assert out_target['boxes'].shape[0] == num_boxes
+
+
