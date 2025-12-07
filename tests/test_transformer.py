@@ -521,3 +521,137 @@ class TestTransformerWithPaddedInputs:
         assert hs.shape[2] == 20
         assert not torch.isnan(hs).any(), "Extreme padding caused NaN"
 
+
+class TestTransformerInputValidation:
+    """Tests for Transformer input validation.
+    
+    The transformer expects inputs to match its configuration:
+    - len(srcs) == len(masks) == len(pos_embeds) == num_feature_levels
+    - Each feature map should have matching spatial dimensions with its mask
+    
+    These tests verify that invalid inputs are handled appropriately.
+    """
+
+    def test_mismatched_input_counts_raises_assertion(self):
+        """len(srcs) != len(masks) should raise AssertionError.
+        
+        The transformer has an assert statement at line 177:
+        assert len(srcs) == len(masks) == len(pos_embeds) == self.num_feature_levels
+        """
+        transformer = CoDeformableDetrTransformer(
+            embed_dim=256,
+            num_heads=8,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            num_feature_levels=4,  # Expects 4 levels
+            num_queries=50,
+        )
+        
+        batch_size = 1
+        
+        # Provide 4 feature maps but only 3 masks (MISMATCH)
+        mlvl_feats = [
+            torch.randn(batch_size, 256, 10, 10),
+            torch.randn(batch_size, 256, 5, 5),
+            torch.randn(batch_size, 256, 3, 3),
+            torch.randn(batch_size, 256, 2, 2),
+        ]
+        mlvl_masks = [
+            torch.zeros(batch_size, 10, 10, dtype=torch.bool),
+            torch.zeros(batch_size, 5, 5, dtype=torch.bool),
+            torch.zeros(batch_size, 3, 3, dtype=torch.bool),
+            # Missing 4th mask!
+        ]
+        mlvl_pos_embeds = [
+            torch.randn(batch_size, 256, 10, 10),
+            torch.randn(batch_size, 256, 5, 5),
+            torch.randn(batch_size, 256, 3, 3),
+            torch.randn(batch_size, 256, 2, 2),
+        ]
+        
+        # Should raise AssertionError due to mismatched counts
+        with pytest.raises(AssertionError):
+            transformer(mlvl_feats, mlvl_masks, mlvl_pos_embeds)
+
+    def test_wrong_num_feature_levels_raises_assertion(self):
+        """Providing wrong number of feature levels should raise error.
+        
+        If transformer is configured for 4 levels but 3 are provided,
+        assertion should fail.
+        """
+        transformer = CoDeformableDetrTransformer(
+            embed_dim=256,
+            num_heads=8,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            num_feature_levels=4,  # Expects 4 levels
+            num_queries=30,
+        )
+        
+        batch_size = 1
+        
+        # Only provide 3 feature levels instead of 4
+        mlvl_feats = [
+            torch.randn(batch_size, 256, 10, 10),
+            torch.randn(batch_size, 256, 5, 5),
+            torch.randn(batch_size, 256, 3, 3),
+        ]
+        mlvl_masks = [
+            torch.zeros(batch_size, 10, 10, dtype=torch.bool),
+            torch.zeros(batch_size, 5, 5, dtype=torch.bool),
+            torch.zeros(batch_size, 3, 3, dtype=torch.bool),
+        ]
+        mlvl_pos_embeds = [
+            torch.randn(batch_size, 256, 10, 10),
+            torch.randn(batch_size, 256, 5, 5),
+            torch.randn(batch_size, 256, 3, 3),
+        ]
+        
+        # Should raise AssertionError
+        with pytest.raises(AssertionError):
+            transformer(mlvl_feats, mlvl_masks, mlvl_pos_embeds)
+
+    def test_correct_input_counts_no_error(self):
+        """Verify correct input counts do not raise errors.
+        
+        This is a sanity check that valid inputs work correctly.
+        """
+        transformer = CoDeformableDetrTransformer(
+            embed_dim=256,
+            num_heads=8,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            num_feature_levels=4,
+            num_queries=30,
+        )
+        
+        batch_size = 1
+        
+        # Correct: all 4 levels provided
+        mlvl_feats = [
+            torch.randn(batch_size, 256, 10, 10),
+            torch.randn(batch_size, 256, 5, 5),
+            torch.randn(batch_size, 256, 3, 3),
+            torch.randn(batch_size, 256, 2, 2),
+        ]
+        mlvl_masks = [
+            torch.zeros(batch_size, 10, 10, dtype=torch.bool),
+            torch.zeros(batch_size, 5, 5, dtype=torch.bool),
+            torch.zeros(batch_size, 3, 3, dtype=torch.bool),
+            torch.zeros(batch_size, 2, 2, dtype=torch.bool),
+        ]
+        mlvl_pos_embeds = [
+            torch.randn(batch_size, 256, 10, 10),
+            torch.randn(batch_size, 256, 5, 5),
+            torch.randn(batch_size, 256, 3, 3),
+            torch.randn(batch_size, 256, 2, 2),
+        ]
+        
+        # Should NOT raise any errors
+        hs, init_ref, inter_ref, enc_cls, enc_coord = transformer(
+            mlvl_feats, mlvl_masks, mlvl_pos_embeds
+        )
+        
+        assert hs.shape[2] == 30  # num_queries
+
+

@@ -431,3 +431,93 @@ class TestYOLODatasetGrayscaleImage:
         
         # Should have exactly 3 channels (alpha dropped)
         assert image.shape[0] == 3, f"Expected 3 channels, got {image.shape[0]}"
+
+
+class TestYOLODatasetCorruptedImage:
+    """Tests for handling corrupted or truncated image files.
+    
+    Real-world datasets often contain corrupted images due to:
+    - Incomplete downloads
+    - Storage corruption
+    - Network transfer errors
+    
+    The dataset should handle these gracefully by either:
+    1. Raising an informative error
+    2. Skipping the corrupted file
+    """
+    
+    @pytest.fixture
+    def corrupted_image_dataset(self, tmp_path):
+        """Create dataset with a corrupted (truncated) image file."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        # Create a file with random bytes that is NOT a valid image
+        corrupted_file = images_dir / "corrupted.jpg"
+        with open(corrupted_file, 'wb') as f:
+            # Write partial JPEG header followed by garbage
+            # This simulates a truncated/corrupted download
+            f.write(b'\xff\xd8\xff\xe0\x00\x10JFIF\x00')  # Partial JPEG header
+            f.write(b'\x00' * 50)  # Random garbage bytes
+        
+        # Create corresponding label file
+        with open(labels_dir / "corrupted.txt", 'w') as f:
+            f.write("0 0.5 0.5 0.2 0.2\n")
+        
+        return tmp_path
+    
+    def test_corrupted_image_raises_error(self, corrupted_image_dataset):
+        """Corrupted images should raise an informative error.
+        
+        When PIL.Image.open() encounters a corrupted file, it will raise
+        one of several exceptions (OSError, IOError, or PIL-specific errors).
+        
+        The dataset should either:
+        1. Let this error propagate with a clear message
+        2. Catch and re-raise with more context
+        """
+        from PIL import Image, UnidentifiedImageError
+        
+        dataset = YOLODataset(
+            data_root=str(corrupted_image_dataset),
+            split='train',
+        )
+        
+        # Attempting to load corrupted image should raise an error
+        with pytest.raises((OSError, IOError, UnidentifiedImageError, Exception)):
+            _ = dataset[0]
+    
+    @pytest.fixture
+    def empty_file_dataset(self, tmp_path):
+        """Create dataset with an empty file (0 bytes)."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        # Create empty file with image extension
+        empty_file = images_dir / "empty.jpg"
+        empty_file.touch()  # Creates 0-byte file
+        
+        with open(labels_dir / "empty.txt", 'w') as f:
+            f.write("0 0.5 0.5 0.2 0.2\n")
+        
+        return tmp_path
+    
+    def test_empty_image_file_raises_error(self, empty_file_dataset):
+        """Empty image files should raise an informative error.
+        
+        A 0-byte file is clearly invalid and should be rejected.
+        """
+        from PIL import Image, UnidentifiedImageError
+        
+        dataset = YOLODataset(
+            data_root=str(empty_file_dataset),
+            split='train',
+        )
+        
+        # Loading empty file should raise error
+        with pytest.raises((OSError, IOError, UnidentifiedImageError, Exception)):
+            _ = dataset[0]
