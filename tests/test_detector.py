@@ -267,3 +267,177 @@ class TestCoDETRMemoryEfficiency:
         # Model should have params (rough estimate: 30-50M for DETR variant)
         assert total_params > 1_000_000  # At least 1M params
         assert trainable_params > 0
+
+
+class TestCoDETREmptyTargets:
+    """Tests for handling empty targets (images without objects)."""
+    
+    def test_train_with_empty_targets(self):
+        """Training should handle images with no objects."""
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(2, 3, 256, 256)
+        
+        # First image has no objects (empty targets)
+        targets = [
+            {'labels': torch.tensor([], dtype=torch.long), 
+             'boxes': torch.zeros(0, 4)},
+            {'labels': torch.tensor([0, 1]), 
+             'boxes': torch.rand(2, 4)},
+        ]
+        
+        # Should not crash
+        outputs = model(images, targets)
+        
+        # Should return loss dict
+        assert isinstance(outputs, dict)
+        
+        # Losses should be valid (not NaN)
+        for key, value in outputs.items():
+            if isinstance(value, torch.Tensor):
+                assert not torch.isnan(value).any(), f"Loss {key} is NaN"
+    
+    def test_train_all_empty_targets(self):
+        """Training with all empty targets should handle gracefully."""
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(2, 3, 256, 256)
+        
+        # All images have no objects
+        targets = [
+            {'labels': torch.tensor([], dtype=torch.long), 
+             'boxes': torch.zeros(0, 4)},
+            {'labels': torch.tensor([], dtype=torch.long), 
+             'boxes': torch.zeros(0, 4)},
+        ]
+        
+        # Should not crash (though losses may be edge cases)
+        try:
+            outputs = model(images, targets)
+            assert isinstance(outputs, dict)
+        except RuntimeError as e:
+            # Some implementations may not support all-empty batches
+            # This is acceptable if documented
+            assert "empty" in str(e).lower() or "no target" in str(e).lower()
+
+
+class TestCoDETRVariableTargets:
+    """Tests for handling variable number of targets per image."""
+    
+    def test_different_num_objects_per_image(self):
+        """Model should handle different object counts per batch item."""
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(3, 3, 256, 256)
+        
+        # Variable object counts: 1, 5, 10
+        targets = [
+            {'labels': torch.tensor([0]), 'boxes': torch.rand(1, 4)},
+            {'labels': torch.randint(0, 20, (5,)), 'boxes': torch.rand(5, 4)},
+            {'labels': torch.randint(0, 20, (10,)), 'boxes': torch.rand(10, 4)},
+        ]
+        
+        outputs = model(images, targets)
+        
+        assert isinstance(outputs, dict)
+    
+    def test_many_objects_per_image(self):
+        """Model should handle crowded scenes with many objects."""
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=100,  # 100 queries
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(1, 3, 256, 256)
+        
+        # Many objects (30) - less than num_queries
+        num_objects = 30
+        targets = [
+            {
+                'labels': torch.randint(0, 20, (num_objects,)), 
+                'boxes': torch.rand(num_objects, 4)
+            }
+        ]
+        
+        outputs = model(images, targets)
+        
+        assert isinstance(outputs, dict)
+        # Should compute valid losses
+        for key, value in outputs.items():
+            if isinstance(value, torch.Tensor):
+                assert not torch.isnan(value).any()
+    
+    def test_single_small_box(self):
+        """Model should handle very small bounding boxes."""
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(1, 3, 256, 256)
+        
+        # Very small box (< 1% of image)
+        targets = [
+            {
+                'labels': torch.tensor([0]), 
+                'boxes': torch.tensor([[0.5, 0.5, 0.005, 0.005]])  # cx, cy, w, h
+            }
+        ]
+        
+        outputs = model(images, targets)
+        
+        assert isinstance(outputs, dict)

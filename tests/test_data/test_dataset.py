@@ -178,3 +178,170 @@ class TestYOLODatasetWithTransforms:
         # After ToTensor, should be float in [0, 1] range
         # After Normalize, values can be outside [0, 1]
         assert image.dtype == torch.float32
+
+
+class TestYOLODatasetRobustEdgeCases:
+    """Tests for robust handling of edge cases that occur in real datasets."""
+    
+    @pytest.fixture
+    def missing_label_dataset(self, tmp_path):
+        """Create dataset where label file is missing."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        from PIL import Image
+        # Create image but NO corresponding label file
+        img = Image.new('RGB', (100, 100))
+        img.save(images_dir / "no_label.jpg")
+        
+        return tmp_path
+    
+    def test_missing_label_file_handled(self, missing_label_dataset):
+        """Missing label file should return empty annotations (not crash)."""
+        try:
+            dataset = YOLODataset(
+                data_root=str(missing_label_dataset),
+                split='train',
+            )
+            
+            _, target = dataset[0]
+            
+            # Should return empty annotations
+            assert target['boxes'].shape[0] == 0
+            assert target['labels'].shape[0] == 0
+        except FileNotFoundError:
+            # Alternative acceptable behavior: raise error
+            pass
+    
+    @pytest.fixture  
+    def invalid_class_id_dataset(self, tmp_path):
+        """Create dataset with class_id outside valid range."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        from PIL import Image
+        img = Image.new('RGB', (100, 100))
+        img.save(images_dir / "invalid_class.jpg")
+        
+        # Create label with very high class ID
+        with open(labels_dir / "invalid_class.txt", 'w') as f:
+            f.write("999 0.5 0.5 0.2 0.2\n")  # class_id=999 likely > num_classes
+        
+        return tmp_path
+    
+    def test_high_class_id_loaded(self, invalid_class_id_dataset):
+        """Dataset should load annotations even with high class IDs."""
+        dataset = YOLODataset(
+            data_root=str(invalid_class_id_dataset),
+            split='train',
+        )
+        
+        _, target = dataset[0]
+        
+        # Label should be loaded as-is (validation happens later)
+        assert target['labels'].shape[0] == 1
+        assert target['labels'][0] == 999
+    
+    @pytest.fixture
+    def out_of_range_boxes_dataset(self, tmp_path):
+        """Create dataset with box coordinates outside [0, 1]."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        from PIL import Image
+        img = Image.new('RGB', (100, 100))
+        img.save(images_dir / "out_of_range.jpg")
+        
+        with open(labels_dir / "out_of_range.txt", 'w') as f:
+            # Intentionally invalid: center at 1.5 (outside image)
+            f.write("0 1.5 0.5 0.2 0.2\n")
+        
+        return tmp_path
+    
+    def test_out_of_range_boxes_loaded(self, out_of_range_boxes_dataset):
+        """Dataset should load boxes even if coordinates are > 1."""
+        dataset = YOLODataset(
+            data_root=str(out_of_range_boxes_dataset),
+            split='train',
+        )
+        
+        _, target = dataset[0]
+        
+        # Box should be loaded (validation/clipping happens at transform stage)
+        assert target['boxes'].shape[0] == 1
+        # The first coordinate (cx) should be 1.5
+        assert target['boxes'][0, 0] == pytest.approx(1.5, rel=0.01)
+    
+    @pytest.fixture
+    def zero_size_box_dataset(self, tmp_path):
+        """Create dataset with zero-area boxes."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        from PIL import Image
+        img = Image.new('RGB', (100, 100))
+        img.save(images_dir / "zero_box.jpg")
+        
+        with open(labels_dir / "zero_box.txt", 'w') as f:
+            # Zero width and height
+            f.write("0 0.5 0.5 0.0 0.0\n")
+        
+        return tmp_path
+    
+    def test_zero_size_box_loaded(self, zero_size_box_dataset):
+        """Dataset should load zero-area boxes without crashing."""
+        dataset = YOLODataset(
+            data_root=str(zero_size_box_dataset),
+            split='train',
+        )
+        
+        _, target = dataset[0]
+        
+        # Zero-size boxes should be loaded
+        assert target['boxes'].shape[0] == 1
+        # Width and height should be 0
+        assert target['boxes'][0, 2] == pytest.approx(0.0)
+        assert target['boxes'][0, 3] == pytest.approx(0.0)
+    
+    @pytest.fixture
+    def malformed_label_dataset(self, tmp_path):
+        """Create dataset with malformed label format."""
+        images_dir = tmp_path / "images" / "train"
+        labels_dir = tmp_path / "labels" / "train"
+        images_dir.mkdir(parents=True)
+        labels_dir.mkdir(parents=True)
+        
+        from PIL import Image
+        img = Image.new('RGB', (100, 100))
+        img.save(images_dir / "malformed.jpg")
+        
+        with open(labels_dir / "malformed.txt", 'w') as f:
+            # Wrong number of columns (only 3 values instead of 5)
+            f.write("0 0.5 0.5\n")
+        
+        return tmp_path
+    
+    def test_malformed_label_handling(self, malformed_label_dataset):
+        """Malformed labels should be handled gracefully."""
+        try:
+            dataset = YOLODataset(
+                data_root=str(malformed_label_dataset),
+                split='train',
+            )
+            
+            _, target = dataset[0]
+            
+            # Either skip malformed line or handle error
+            # Empty is acceptable
+            assert target['boxes'].shape[1] == 4 or target['boxes'].shape[0] == 0
+        except (ValueError, IndexError):
+            # Raising a clear error is also acceptable
+            pass
