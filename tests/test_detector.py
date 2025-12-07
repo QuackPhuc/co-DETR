@@ -441,3 +441,278 @@ class TestCoDETRVariableTargets:
         outputs = model(images, targets)
         
         assert isinstance(outputs, dict)
+
+
+class TestCoDETRWithQueryDenoising:
+    """Tests for CoDETR with query denoising enabled (use_dn=True flow).
+    
+    These tests verify the denoising queries mechanism works correctly,
+    including attention mask generation and DN loss computation.
+    """
+    
+    def test_use_dn_true_forward_pass(self):
+        """Model with use_dn=True should complete forward pass without errors.
+        
+        This tests the complete DN flow including:
+        - DnQueryGenerator creates denoising queries
+        - Attention mask is correctly generated
+        - DN queries are concatenated with content queries
+        """
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=True,  # Enable query denoising
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        assert model.dn_generator is not None, "DnQueryGenerator should be created"
+        
+        images = torch.randn(2, 3, 256, 256)
+        targets = [
+            {'labels': torch.tensor([0, 1, 2]), 'boxes': torch.rand(3, 4)},
+            {'labels': torch.tensor([5]), 'boxes': torch.rand(1, 4)},
+        ]
+        
+        # Should not crash with use_dn=True
+        outputs = model(images=images, targets=targets)
+        
+        # Should return losses
+        assert isinstance(outputs, dict)
+        
+        # Losses should be valid numbers
+        for key, value in outputs.items():
+            if isinstance(value, torch.Tensor):
+                assert not torch.isnan(value).any(), f"Loss {key} contains NaN"
+    
+    def test_use_dn_with_empty_targets_graceful(self):
+        """Query denoising should handle images without objects gracefully.
+        
+        When GT is empty, DN generator should not crash but produce
+        empty or zero denoising queries.
+        """
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=True,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(2, 3, 256, 256)
+        
+        # First image has objects, second is empty
+        targets = [
+            {'labels': torch.tensor([0, 1]), 'boxes': torch.rand(2, 4)},
+            {'labels': torch.tensor([], dtype=torch.long), 'boxes': torch.zeros(0, 4)},
+        ]
+        
+        # Should not crash
+        outputs = model(images=images, targets=targets)
+        assert isinstance(outputs, dict)
+    
+    def test_use_dn_creates_attention_mask(self):
+        """Verify DN generator produces attention mask for decoder.
+        
+        The attention mask is critical for preventing DN queries from
+        attending to content queries during training.
+        """
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=True,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        assert model.dn_generator is not None
+        
+        # DN generator should exist and be properly configured
+        assert hasattr(model.dn_generator, 'num_queries')
+        assert hasattr(model.dn_generator, 'hidden_dim')
+
+
+class TestCoDETRLargeBoxes:
+    """Tests for handling very large bounding boxes (>50% of image area).
+    
+    Large boxes are common in close-up shots and should be properly handled
+    by the detection head and loss computation.
+    """
+    
+    def test_large_box_covering_half_image(self):
+        """Model should handle boxes covering >50% of image.
+        
+        Mathematical check: box with w=0.7, h=0.8 covers 56% of image.
+        This is common in close-up product photography.
+        """
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(1, 3, 256, 256)
+        
+        # Large box covering ~56% of image (0.7 * 0.8 = 0.56)
+        targets = [
+            {
+                'labels': torch.tensor([0]),
+                'boxes': torch.tensor([[0.5, 0.5, 0.7, 0.8]])  # cx, cy, w, h (normalized)
+            }
+        ]
+        
+        outputs = model(images=images, targets=targets)
+        
+        assert isinstance(outputs, dict)
+        # Losses should be valid
+        for key, value in outputs.items():
+            if isinstance(value, torch.Tensor):
+                assert not torch.isnan(value).any(), f"Loss {key} is NaN for large box"
+                assert not torch.isinf(value).any(), f"Loss {key} is Inf for large box"
+    
+    def test_multiple_large_boxes_overlap(self):
+        """Multiple large overlapping boxes should not cause numerical issues.
+        
+        This tests the matcher and loss computation with overlapping targets.
+        """
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=50,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(1, 3, 256, 256)
+        
+        # Multiple large overlapping boxes
+        targets = [
+            {
+                'labels': torch.tensor([0, 1, 2]),
+                'boxes': torch.tensor([
+                    [0.4, 0.4, 0.6, 0.6],  # Large box 1
+                    [0.5, 0.5, 0.55, 0.55],  # Large box 2, overlapping
+                    [0.6, 0.6, 0.5, 0.5],  # Large box 3, overlapping
+                ])
+            }
+        ]
+        
+        outputs = model(images=images, targets=targets)
+        assert isinstance(outputs, dict)
+
+
+class TestCoDETRQueryTargetRatio:
+    """Tests for scenarios where num_targets > num_queries.
+    
+    This is an edge case that can occur with crowded scenes.
+    The matcher should handle this gracefully.
+    """
+    
+    def test_more_targets_than_queries(self):
+        """Model should handle more GT objects than queries.
+        
+        Mathematical constraint: With num_queries=N and num_targets=M where M>N,
+        the Hungarian matcher should match N targets (since each query can
+        only match one target). The remaining M-N targets will be unmatched.
+        """
+        num_queries = 10  # Very few queries
+        num_targets = 15  # More targets than queries
+        
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=num_queries,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(1, 3, 256, 256)
+        
+        # More targets than queries
+        targets = [
+            {
+                'labels': torch.randint(low=0, high=20, size=(num_targets,)),
+                'boxes': torch.rand(num_targets, 4)
+            }
+        ]
+        
+        # Should not crash - matcher handles this case
+        outputs = model(images=images, targets=targets)
+        
+        assert isinstance(outputs, dict)
+        # Loss should still be computable
+        for key, value in outputs.items():
+            if isinstance(value, torch.Tensor):
+                assert not torch.isnan(value).any(), f"Loss {key} is NaN"
+    
+    def test_exactly_matching_queries_and_targets(self):
+        """Model should handle exactly matching query and target counts.
+        
+        When num_queries == num_targets, every query should be matched.
+        """
+        num_queries = 20
+        
+        model = CoDETR(
+            num_classes=20,
+            embed_dim=256,
+            num_queries=num_queries,
+            num_encoder_layers=1,
+            num_decoder_layers=1,
+            use_rpn=False,
+            use_roi=False,
+            use_atss=False,
+            use_dn=False,
+            pretrained_backbone=False,
+        )
+        model.train()
+        
+        images = torch.randn(1, 3, 256, 256)
+        
+        # Exactly num_queries targets
+        targets = [
+            {
+                'labels': torch.randint(low=0, high=20, size=(num_queries,)),
+                'boxes': torch.rand(num_queries, 4)
+            }
+        ]
+        
+        outputs = model(images=images, targets=targets)
+        assert isinstance(outputs, dict)

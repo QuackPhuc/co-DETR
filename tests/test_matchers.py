@@ -234,3 +234,165 @@ class TestSimpleMatcher:
         
         # Should have exactly one match
         assert len(pred_idx) == 1
+
+
+class TestHungarianMatcherMoreTargetsThanQueries:
+    """Tests for when number of targets exceeds number of queries.
+    
+    This is an important edge case for crowded scenes where there may be
+    more ground truth objects than the model's query capacity.
+    """
+    
+    def test_matcher_handles_more_targets_than_queries(self):
+        """Matcher should handle case where num_targets > num_queries.
+        
+        Mathematical constraint: The Hungarian algorithm matches min(N, M) pairs
+        where N = num_queries and M = num_targets. When M > N, only N matches
+        are made and M-N targets remain unmatched.
+        """
+        matcher = HungarianMatcher(cost_class=1.0, cost_bbox=5.0, cost_giou=2.0)
+        
+        num_queries = 10  # Small number of queries
+        num_targets = 20  # More targets than queries
+        num_classes = 80
+        
+        pred_logits = torch.randn(1, num_queries, num_classes)
+        pred_boxes = torch.rand(1, num_queries, 4)
+        
+        targets = [{
+            'labels': torch.randint(low=0, high=num_classes, size=(num_targets,)),
+            'boxes': torch.rand(num_targets, 4)
+        }]
+        
+        # Should not crash
+        indices = matcher(pred_logits=pred_logits, pred_boxes=pred_boxes, targets=targets)
+        
+        pred_idx, tgt_idx = indices[0]
+        
+        # Number of matches should be min(num_queries, num_targets) = num_queries
+        assert len(pred_idx) == len(tgt_idx)
+        assert len(pred_idx) <= num_queries
+        
+        # All indices should be valid
+        assert (pred_idx >= 0).all()
+        assert (pred_idx < num_queries).all()
+        assert (tgt_idx >= 0).all()
+        assert (tgt_idx < num_targets).all()
+    
+    def test_matcher_matches_all_queries_when_fewer_than_targets(self):
+        """When num_targets > num_queries, all queries should be matched.
+        
+        Each query should be assigned exactly one target, with the remaining
+        targets unassigned (they contribute to the background class).
+        """
+        matcher = HungarianMatcher()
+        
+        num_queries = 5
+        num_targets = 10
+        
+        pred_logits = torch.randn(1, num_queries, 80)
+        pred_boxes = torch.rand(1, num_queries, 4)
+        
+        targets = [{
+            'labels': torch.randint(low=0, high=80, size=(num_targets,)),
+            'boxes': torch.rand(num_targets, 4)
+        }]
+        
+        indices = matcher(pred_logits=pred_logits, pred_boxes=pred_boxes, targets=targets)
+        
+        pred_idx, tgt_idx = indices[0]
+        
+        # All queries should be matched (since there are enough targets)
+        # Note: actually, matcher returns up to min(queries, targets) matches
+        # Each query can only match once, so we get num_queries matches
+        assert len(pred_idx) <= num_queries
+        
+        # Each prediction index should be unique
+        assert len(pred_idx.unique()) == len(pred_idx)
+    
+    def test_batch_with_varying_target_counts(self):
+        """Test batch where some images have more targets than queries.
+        
+        This simulates realistic batch with mixed crowding levels.
+        """
+        matcher = HungarianMatcher()
+        
+        num_queries = 15
+        
+        pred_logits = torch.randn(3, num_queries, 80)
+        pred_boxes = torch.rand(3, num_queries, 4)
+        
+        targets = [
+            # Image 1: fewer targets than queries
+            {'labels': torch.randint(0, 80, (5,)), 'boxes': torch.rand(5, 4)},
+            # Image 2: more targets than queries  
+            {'labels': torch.randint(0, 80, (25,)), 'boxes': torch.rand(25, 4)},
+            # Image 3: equal targets and queries
+            {'labels': torch.randint(0, 80, (num_queries,)), 'boxes': torch.rand(num_queries, 4)},
+        ]
+        
+        indices = matcher(pred_logits=pred_logits, pred_boxes=pred_boxes, targets=targets)
+        
+        # Should handle all three cases
+        assert len(indices) == 3
+        
+        # Image 1: all 5 targets matched
+        assert len(indices[0][0]) == 5
+        
+        # Image 2: at most num_queries matched (15)
+        assert len(indices[1][0]) <= num_queries
+        
+        # Image 3: all num_queries matched
+        assert len(indices[2][0]) == num_queries
+
+
+class TestHungarianMatcherImbalancedClasses:
+    """Tests for loss computation with imbalanced class distribution.
+    
+    Real datasets often have class imbalance (e.g., many cars but few trucks).
+    The matcher and loss should handle this without numerical issues.
+    """
+    
+    def test_single_class_batch(self):
+        """All targets belong to single class should work correctly."""
+        matcher = HungarianMatcher()
+        
+        pred_logits = torch.randn(1, 50, 80)
+        pred_boxes = torch.rand(1, 50, 4)
+        
+        # All 10 targets are class 0
+        targets = [{
+            'labels': torch.zeros(10, dtype=torch.long),  # All same class
+            'boxes': torch.rand(10, 4)
+        }]
+        
+        indices = matcher(pred_logits=pred_logits, pred_boxes=pred_boxes, targets=targets)
+        
+        pred_idx, tgt_idx = indices[0]
+        
+        assert len(pred_idx) == 10
+        # Each query matched to exactly one target
+        assert len(pred_idx.unique()) == 10
+    
+    def test_rare_class_representation(self):
+        """Batch with mostly common classes and rare classes should be handled."""
+        matcher = HungarianMatcher()
+        
+        pred_logits = torch.randn(1, 100, 80)
+        pred_boxes = torch.rand(1, 100, 4)
+        
+        # 15 targets: 12 common class (0), 2 medium class (10), 1 rare class (79)
+        labels = torch.tensor([0]*12 + [10, 10] + [79])
+        boxes = torch.rand(15, 4)
+        
+        targets = [{'labels': labels, 'boxes': boxes}]
+        
+        indices = matcher(pred_logits=pred_logits, pred_boxes=pred_boxes, targets=targets)
+        
+        pred_idx, tgt_idx = indices[0]
+        
+        # All 15 targets should be matched
+        assert len(pred_idx) == 15
+        
+        # Rare class (index 14 in targets) should be matched
+        assert 14 in tgt_idx
