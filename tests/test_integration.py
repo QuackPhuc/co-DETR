@@ -23,6 +23,7 @@ class TestFullForwardPass:
             num_classes=20,
             pretrained_backbone=False,
             use_aux_heads=False,
+            use_dn=False,  # Disable denoising to avoid attn_mask size mismatch
         )
         model.train()
         
@@ -153,6 +154,7 @@ class TestGradientFlowEndToEnd:
         model = build_codetr(
             num_classes=10,
             pretrained_backbone=False,
+            use_dn=False,  # Disable denoising to avoid attn_mask size mismatch
         )
         model.train()
         

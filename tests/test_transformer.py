@@ -294,34 +294,38 @@ class TestCoDeformableDetrTransformer:
     
     def test_transformer_output_shapes(self):
         """Test transformer outputs have correct shapes."""
+        # Use smaller num_queries that fits within total spatial positions
+        # or use larger feature maps. Here we use num_queries=100
+        # and ensure total positions (20*20 + 10*10 + 5*5 + 3*3) = 400+100+25+9 = 534 > 100
         transformer = CoDeformableDetrTransformer(
             embed_dim=256,
             num_heads=8,
             num_encoder_layers=2,
             num_decoder_layers=2,
             num_feature_levels=4,
-            num_queries=300,
+            num_queries=100,  # Reduced to fit spatial positions
         )
         
-        # Prepare multi-scale features
+        # Prepare multi-scale features with enough total spatial positions
+        # Total: 20*20 + 10*10 + 5*5 + 3*3 = 400 + 100 + 25 + 9 = 534 positions
         batch_size = 2
         mlvl_feats = [
+            torch.randn(batch_size, 256, 20, 20),
             torch.randn(batch_size, 256, 10, 10),
             torch.randn(batch_size, 256, 5, 5),
             torch.randn(batch_size, 256, 3, 3),
-            torch.randn(batch_size, 256, 2, 2),
         ]
         mlvl_masks = [
+            torch.zeros(batch_size, 20, 20, dtype=torch.bool),
             torch.zeros(batch_size, 10, 10, dtype=torch.bool),
             torch.zeros(batch_size, 5, 5, dtype=torch.bool),
             torch.zeros(batch_size, 3, 3, dtype=torch.bool),
-            torch.zeros(batch_size, 2, 2, dtype=torch.bool),
         ]
         mlvl_pos_embeds = [
+            torch.randn(batch_size, 256, 20, 20),
             torch.randn(batch_size, 256, 10, 10),
             torch.randn(batch_size, 256, 5, 5),
             torch.randn(batch_size, 256, 3, 3),
-            torch.randn(batch_size, 256, 2, 2),
         ]
         
         hs, init_ref, inter_ref, enc_out = transformer(
@@ -330,32 +334,35 @@ class TestCoDeformableDetrTransformer:
         
         # Hidden states: (num_layers, batch, num_queries, embed_dim)
         assert hs.shape[1] == batch_size
-        assert hs.shape[2] == 300
+        assert hs.shape[2] == 100
         assert hs.shape[3] == 256
         
         # Initial references: (batch, num_queries, 2)
-        assert init_ref.shape == (batch_size, 300, 2)
+        assert init_ref.shape == (batch_size, 100, 2)
     
     def test_transformer_gradient_flow(self):
         """Test gradients flow through entire transformer."""
+        # Use smaller num_queries that fits within total spatial positions
+        # Total: 15*15 + 10*10 + 7*7 + 5*5 = 225 + 100 + 49 + 25 = 399 positions
         transformer = CoDeformableDetrTransformer(
             embed_dim=256,
             num_heads=8,
             num_encoder_layers=1,
             num_decoder_layers=1,
             num_feature_levels=4,
-            num_queries=100,
+            num_queries=50,  # Reduced to fit spatial positions
         )
         
         batch_size = 1
+        # Use larger feature sizes to have enough spatial positions
         mlvl_feats = [
+            torch.randn(batch_size, 256, 15, 15, requires_grad=True),
+            torch.randn(batch_size, 256, 10, 10, requires_grad=True),
+            torch.randn(batch_size, 256, 7, 7, requires_grad=True),
             torch.randn(batch_size, 256, 5, 5, requires_grad=True),
-            torch.randn(batch_size, 256, 3, 3, requires_grad=True),
-            torch.randn(batch_size, 256, 2, 2, requires_grad=True),
-            torch.randn(batch_size, 256, 1, 1, requires_grad=True),
         ]
-        mlvl_masks = [torch.zeros(batch_size, h, w, dtype=torch.bool) for h, w in [(5,5), (3,3), (2,2), (1,1)]]
-        mlvl_pos_embeds = [torch.randn(batch_size, 256, h, w) for h, w in [(5,5), (3,3), (2,2), (1,1)]]
+        mlvl_masks = [torch.zeros(batch_size, h, w, dtype=torch.bool) for h, w in [(15,15), (10,10), (7,7), (5,5)]]
+        mlvl_pos_embeds = [torch.randn(batch_size, 256, h, w) for h, w in [(15,15), (10,10), (7,7), (5,5)]]
         
         hs, _, _, _ = transformer(mlvl_feats, mlvl_masks, mlvl_pos_embeds)
         loss = hs.sum()

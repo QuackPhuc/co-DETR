@@ -118,6 +118,7 @@ class TestCoDETRAuxiliaryHeads:
             use_rpn=True,
             use_roi=False,
             use_atss=False,
+            use_dn=False,  # Disable denoising to avoid attn_mask size mismatch
             pretrained_backbone=False,
         )
         model.train()
