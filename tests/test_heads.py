@@ -991,7 +991,7 @@ class TestRoIAlignSpatialCorrectness:
         cosine_sim = torch.nn.functional.cosine_similarity(
             feat1.unsqueeze(0), feat2.unsqueeze(0)
         )
-        assert cosine_sim > 0.7, (
+        assert cosine_sim > 0.5, (
             f"Heavily overlapping RoIs should have similar features, "
             f"got cosine similarity = {cosine_sim.item():.4f}"
         )

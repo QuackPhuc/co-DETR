@@ -347,10 +347,13 @@ class TestResNetBackboneGradientStability:
 
         # Test with ImageNet-normalized range (approx [-2.5, 2.5])
         backbone.zero_grad()
-        x_imagenet = torch.randn(1, 3, 128, 128, requires_grad=True) * 0.5
+        x_imagenet_data = torch.randn(1, 3, 128, 128) * 0.5
+        x_imagenet = x_imagenet_data.clone().requires_grad_(True)
         features_imagenet = backbone(x_imagenet)
         loss_imagenet = features_imagenet[0].mean()
         loss_imagenet.backward()
         
+        # Verify gradient exists and is finite
+        assert x_imagenet.grad is not None, "Gradient should exist for leaf tensor"
         assert torch.isfinite(x_imagenet.grad).all()
 
