@@ -119,7 +119,7 @@ class TestDeformableTransformerEncoder:
         encoder_layer = DeformableTransformerEncoderLayer(
             embed_dim=256,
             num_heads=8,
-            ffn_dim=1024,
+            feedforward_dim=1024,
             dropout=0.1,
         )
         
@@ -134,12 +134,15 @@ class TestDeformableTransformerEncoder:
     
     def test_full_encoder_output_shape(self):
         """Full encoder should output same shape as input."""
-        encoder = CoDeformableDetrTransformerEncoder(
+        encoder_layer = DeformableTransformerEncoderLayer(
             embed_dim=256,
             num_heads=8,
-            ffn_dim=1024,
-            num_layers=6,
+            feedforward_dim=1024,
             num_levels=4,
+        )
+        encoder = CoDeformableDetrTransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=6,
         )
         
         query = torch.randn(1, 100, 256)
@@ -153,12 +156,15 @@ class TestDeformableTransformerEncoder:
     
     def test_encoder_gradient_flow(self):
         """Test gradients flow through all encoder layers."""
-        encoder = CoDeformableDetrTransformerEncoder(
+        encoder_layer = DeformableTransformerEncoderLayer(
             embed_dim=256,
             num_heads=8,
-            ffn_dim=1024,
-            num_layers=3,  # Fewer layers for speed
+            feedforward_dim=1024,
             num_levels=4,
+        )
+        encoder = CoDeformableDetrTransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=3,  # Fewer layers for speed
         )
         
         query = torch.randn(1, 50, 256, requires_grad=True)
@@ -182,7 +188,7 @@ class TestDeformableTransformerDecoder:
         decoder_layer = DeformableTransformerDecoderLayer(
             embed_dim=256,
             num_heads=8,
-            ffn_dim=1024,
+            feedforward_dim=1024,
             dropout=0.1,
         )
         
@@ -192,18 +198,21 @@ class TestDeformableTransformerDecoder:
         spatial_shapes = torch.tensor([[5, 5], [4, 4], [3, 3], [2, 2]], dtype=torch.long)
         level_start_index = torch.tensor([0, 25, 41, 50], dtype=torch.long)
         
-        output = decoder_layer(query, memory, reference_points, spatial_shapes, level_start_index)
+        output = decoder_layer(query, reference_points, memory, spatial_shapes, level_start_index)
         
         assert output.shape == query.shape
     
     def test_full_decoder_intermediate_outputs(self):
         """Decoder should return intermediate outputs from all layers."""
-        decoder = CoDeformableDetrTransformerDecoder(
+        decoder_layer = DeformableTransformerDecoderLayer(
             embed_dim=256,
             num_heads=8,
-            ffn_dim=1024,
-            num_layers=6,
+            feedforward_dim=1024,
             num_levels=4,
+        )
+        decoder = CoDeformableDetrTransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=6,
         )
         
         query = torch.randn(1, 300, 256)
@@ -226,7 +235,7 @@ class TestDeformableTransformerDecoder:
         decoder_layer = DeformableTransformerDecoderLayer(
             embed_dim=256,
             num_heads=8,
-            ffn_dim=1024,
+            feedforward_dim=1024,
         )
         
         # Verify self_attn exists
@@ -234,12 +243,15 @@ class TestDeformableTransformerDecoder:
     
     def test_decoder_gradient_flow(self):
         """Test gradients flow through decoder."""
-        decoder = CoDeformableDetrTransformerDecoder(
+        decoder_layer = DeformableTransformerDecoderLayer(
             embed_dim=256,
             num_heads=8,
-            ffn_dim=1024,
-            num_layers=2,
+            feedforward_dim=1024,
             num_levels=4,
+        )
+        decoder = CoDeformableDetrTransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=2,
         )
         
         query = torch.randn(1, 100, 256, requires_grad=True)
@@ -270,7 +282,7 @@ class TestCoDeformableDetrTransformer:
             num_heads=8,
             num_encoder_layers=2,
             num_decoder_layers=2,
-            num_levels=4,
+            num_feature_levels=4,
             num_queries=300,
         )
         
@@ -314,7 +326,7 @@ class TestCoDeformableDetrTransformer:
             num_heads=8,
             num_encoder_layers=1,
             num_decoder_layers=1,
-            num_levels=4,
+            num_feature_levels=4,
             num_queries=100,
         )
         
