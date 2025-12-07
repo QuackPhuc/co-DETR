@@ -44,7 +44,6 @@ class TestCUDATensorCompatibility:
         from codetr.models.backbone import ResNetBackbone
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             norm_eval=True,
             pretrained=False,
@@ -68,7 +67,6 @@ class TestCUDATensorCompatibility:
         from codetr.models.backbone import ResNetBackbone
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             norm_eval=True,
             pretrained=False,
@@ -98,7 +96,7 @@ class TestCUDATensorCompatibility:
         neck = ChannelMapper(
             in_channels=[512, 1024, 2048],
             out_channels=256,
-            num_outs=4,
+            num_extra_levels=1,
         ).to(cuda_device)
         
         # Create CUDA backbone features
@@ -161,9 +159,9 @@ class TestCUDATensorCompatibility:
         
         head = CoDeformDETRHead(
             num_classes=80,
-            embed_dim=256,
+            embed_dims=256,
             num_decoder_layers=2,
-            num_queries=100,
+            num_query=100,
         ).to(cuda_device)
         
         batch_size = 2
@@ -206,8 +204,8 @@ class TestCUDATensorCompatibility:
         )
         
         bbox_loss = giou_loss(
-            pred_boxes=pred_boxes.view(-1, 4),
-            target_boxes=target_boxes.view(-1, 4),
+            inputs=pred_boxes.view(-1, 4),
+            targets=target_boxes.view(-1, 4),
         )
         
         assert cls_loss.is_cuda, "Classification loss should be on CUDA"
@@ -221,7 +219,6 @@ class TestCUDATensorCompatibility:
         from codetr.models.neck import ChannelMapper
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             pretrained=False,
         ).to(cuda_device)
@@ -229,7 +226,7 @@ class TestCUDATensorCompatibility:
         neck = ChannelMapper(
             in_channels=[512, 1024, 2048],
             out_channels=256,
-            num_outs=4,
+            num_extra_levels=1,
         ).to(cuda_device)
         
         images = torch.rand(2, 3, 224, 224, device=cuda_device)
@@ -252,7 +249,6 @@ class TestCUDATensorCompatibility:
         
         # Create and run model
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             pretrained=False,
         ).to(cuda_device)
@@ -299,7 +295,6 @@ class TestMemoryStressLargerBatches:
         from codetr.models.backbone import ResNetBackbone
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             pretrained=False,
         ).to(cuda_device)
@@ -319,7 +314,6 @@ class TestMemoryStressLargerBatches:
         from codetr.models.backbone import ResNetBackbone
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             pretrained=False,
         ).to(cuda_device)
@@ -341,7 +335,6 @@ class TestMemoryStressLargerBatches:
         from codetr.models.neck import ChannelMapper
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             pretrained=False,
         ).to(cuda_device)
@@ -349,7 +342,7 @@ class TestMemoryStressLargerBatches:
         neck = ChannelMapper(
             in_channels=[512, 1024, 2048],
             out_channels=256,
-            num_outs=4,
+            num_extra_levels=1,
         ).to(cuda_device)
         
         backbone.eval()
@@ -411,7 +404,6 @@ class TestMemoryStressLargerBatches:
         from codetr.models.backbone import ResNetBackbone
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             pretrained=False,
         ).to(cuda_device)
@@ -451,9 +443,9 @@ class TestMemoryStressLargerBatches:
         
         head = CoDeformDETRHead(
             num_classes=80,
-            embed_dim=256,
+            embed_dims=256,
             num_decoder_layers=2,
-            num_queries=num_queries,
+            num_query=num_queries,
         ).to(cuda_device)
         head.eval()
         
@@ -495,7 +487,6 @@ class TestPerformanceBenchmarks:
         from codetr.models.backbone import ResNetBackbone
         
         backbone = ResNetBackbone(
-            depth=50,
             frozen_stages=1,
             pretrained=False,
         ).to(cuda_device)
@@ -540,7 +531,7 @@ class TestPerformanceBenchmarks:
         neck = ChannelMapper(
             in_channels=[512, 1024, 2048],
             out_channels=256,
-            num_outs=4,
+            num_extra_levels=1,
         ).to(cuda_device)
         neck.eval()
         
@@ -579,14 +570,24 @@ class TestPerformanceBenchmarks:
     
     def test_transformer_encoder_latency(self, cuda_device):
         """Measure transformer encoder latency."""
-        from codetr.models.transformer.encoder import CoDeformableDetrTransformerEncoder
+        from codetr.models.transformer.encoder import (
+            CoDeformableDetrTransformerEncoder,
+            DeformableTransformerEncoderLayer,
+        )
         
-        encoder = CoDeformableDetrTransformerEncoder(
+        # Create encoder layer first
+        encoder_layer = DeformableTransformerEncoderLayer(
             embed_dim=256,
             num_heads=8,
-            num_layers=6,
+            feedforward_dim=1024,
+            dropout=0.1,
             num_levels=4,
             num_points=4,
+        )
+        
+        encoder = CoDeformableDetrTransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=6,
         ).to(cuda_device)
         encoder.eval()
         
@@ -604,18 +605,16 @@ class TestPerformanceBenchmarks:
         valid_ratios = torch.ones(batch_size, 4, 2, device=cuda_device)
         
         reference_points = torch.rand(batch_size, total_len, 4, 2, device=cuda_device)
-        pos_embed = torch.rand(batch_size, total_len, 256, device=cuda_device)
         
         # Warmup
         with torch.no_grad():
             for _ in range(num_warmup):
                 _ = encoder(
-                    query=query,
+                    src=query,
+                    reference_points=reference_points,
                     spatial_shapes=spatial_shapes,
                     level_start_index=level_start_index,
                     valid_ratios=valid_ratios,
-                    reference_points=reference_points,
-                    pos_embed=pos_embed,
                 )
         
         torch.cuda.synchronize()
@@ -624,12 +623,11 @@ class TestPerformanceBenchmarks:
         with torch.no_grad():
             for _ in range(num_iterations):
                 _ = encoder(
-                    query=query,
+                    src=query,
+                    reference_points=reference_points,
                     spatial_shapes=spatial_shapes,
                     level_start_index=level_start_index,
                     valid_ratios=valid_ratios,
-                    reference_points=reference_points,
-                    pos_embed=pos_embed,
                 )
         torch.cuda.synchronize()
         end_time = time.perf_counter()
@@ -725,14 +723,14 @@ class TestPerformanceBenchmarks:
         # Warmup
         for _ in range(num_warmup):
             _ = focal_loss(inputs=pred_logits, targets=target_classes)
-            _ = giou_loss(pred_boxes=pred_boxes, target_boxes=target_boxes)
+            _ = giou_loss(inputs=pred_boxes, targets=target_boxes)
         
         torch.cuda.synchronize()
         
         start_time = time.perf_counter()
         for _ in range(num_iterations):
             _ = focal_loss(inputs=pred_logits, targets=target_classes)
-            _ = giou_loss(pred_boxes=pred_boxes, target_boxes=target_boxes)
+            _ = giou_loss(inputs=pred_boxes, targets=target_boxes)
         torch.cuda.synchronize()
         end_time = time.perf_counter()
         
@@ -799,14 +797,14 @@ class TestCombinedStressScenarios:
         from codetr.models.utils.position_encoding import PositionEmbeddingSine
         
         # Build components
-        backbone = ResNetBackbone(depth=50, frozen_stages=1, pretrained=False).to(cuda_device)
-        neck = ChannelMapper(in_channels=[512, 1024, 2048], out_channels=256, num_outs=4).to(cuda_device)
+        backbone = ResNetBackbone(frozen_stages=1, pretrained=False).to(cuda_device)
+        neck = ChannelMapper(in_channels=[512, 1024, 2048], out_channels=256, num_extra_levels=1).to(cuda_device)
         transformer = CoDeformableDetrTransformer(
             embed_dim=256, num_heads=8, num_encoder_layers=2, num_decoder_layers=2,
             num_feature_levels=4, num_queries=100,
         ).to(cuda_device)
         head = CoDeformDETRHead(
-            num_classes=80, embed_dim=256, num_decoder_layers=2, num_queries=100,
+            num_classes=80, embed_dims=256, num_decoder_layers=2, num_query=100,
         ).to(cuda_device)
         pos_encoder = PositionEmbeddingSine(num_pos_feats=128).to(cuda_device)
         
@@ -860,7 +858,7 @@ class TestCombinedStressScenarios:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(cuda_device)
         
-        backbone = ResNetBackbone(depth=50, frozen_stages=1, pretrained=False).to(cuda_device)
+        backbone = ResNetBackbone(frozen_stages=1, pretrained=False).to(cuda_device)
         backbone.train()
         
         optimizer = torch.optim.AdamW(
