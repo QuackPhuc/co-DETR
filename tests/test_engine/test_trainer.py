@@ -117,6 +117,7 @@ class TestTrainerGradientClipping:
         
         # Trainer uses 'gradient_clip' attribute from config (default 0.1)
         assert hasattr(trainer, 'gradient_clip')
+        assert trainer.gradient_clip > 0  # Default should be positive
         
         # Create large gradient
         x = torch.randn(2, 10) * 1000
@@ -126,12 +127,19 @@ class TestTrainerGradientClipping:
         optimizer.zero_grad()
         loss.backward()
         
-        # Test that clipping can be applied
-        actual_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.gradient_clip)
+        # clip_grad_norm_ returns the norm BEFORE clipping, but then clips in-place
+        # So we call it and then compute the norm again to verify clipping worked
+        torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.gradient_clip)
         
-        # After clipping, norm should be <= gradient_clip
-        # (Since we clipped, this should pass)
-        assert actual_norm <= trainer.gradient_clip + 1e-6 or trainer.gradient_clip == 0
+        # Compute gradient norm after clipping
+        total_norm = 0.0
+        for p in model.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        actual_norm_after = total_norm ** 0.5
+        
+        # After clipping, norm should be <= gradient_clip (with small tolerance)
+        assert actual_norm_after <= trainer.gradient_clip + 1e-5
 
 
 class TestTrainerCheckpointing:
@@ -230,17 +238,25 @@ class TestTrainerAMP:
         assert hasattr(trainer, 'use_amp')
     
     def test_amp_disabled(self):
-        """Test AMP is disabled by default on CPU."""
+        """Test AMP can be disabled via config."""
         model = MockModel()
         optimizer = torch.optim.Adam(model.parameters())
         train_loader = create_mock_dataloader()
+        
+        # Create config that explicitly disables AMP
+        class ConfigAMPDisabled:
+            def get(self, key, default=None):
+                if key == 'train.amp':
+                    return False  # Explicitly disable AMP
+                return default
         
         trainer = Trainer(
             model=model,
             train_loader=train_loader,
             optimizer=optimizer,
             device=torch.device('cpu'),
+            config=ConfigAMPDisabled(),
         )
         
-        # AMP is disabled on CPU
+        # AMP should be disabled when config says False
         assert trainer.use_amp == False

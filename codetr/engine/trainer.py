@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn, Tensor
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
@@ -123,7 +123,7 @@ class Trainer:
         
         # Mixed precision
         self.use_amp = self._get_config("train.amp", True) and torch.cuda.is_available()
-        self.scaler = GradScaler() if self.use_amp else None
+        self.scaler = GradScaler('cuda') if self.use_amp else None
         
         # Gradient clipping
         self.gradient_clip = self._get_config("train.gradient_clip", 0.1)
@@ -332,7 +332,7 @@ class Trainer:
         
         # Forward pass with optional AMP
         if self.use_amp:
-            with autocast():
+            with autocast('cuda'):
                 losses = self.model(images_tensor, targets)
                 if isinstance(losses, dict):
                     loss = sum(losses.values())
@@ -406,7 +406,7 @@ class Trainer:
                 
                 # Forward pass
                 if self.use_amp:
-                    with autocast():
+                    with autocast('cuda'):
                         losses = self.model(images_tensor, targets)
                 else:
                     losses = self.model(images_tensor, targets)
