@@ -151,7 +151,9 @@ class CoDeformableDetrTransformer(nn.Module):
         pos_embeds: list,
         query_embed: Optional[Tensor] = None,
         attn_mask: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        dn_label_embed: Optional[Tensor] = None,
+        dn_bbox_embed: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Forward pass of the transformer.
 
         Args:
@@ -160,6 +162,8 @@ class CoDeformableDetrTransformer(nn.Module):
             pos_embeds: List of positional embeddings, each of shape (batch, embed_dim, H_i, W_i).
             query_embed: Optional custom query embeddings of shape (num_queries, embed_dim).
             attn_mask: Optional attention mask for query denoising.
+            dn_label_embed: Optional DN label queries of shape (batch, num_dn, embed_dim).
+            dn_bbox_embed: Optional DN bbox queries of shape (batch, num_dn, 4).
 
         Returns:
             Tuple of:
@@ -224,6 +228,10 @@ class CoDeformableDetrTransformer(nn.Module):
             enc_outputs_coord_unact = None
 
             topk = self.num_queries
+            # Clamp topk to available positions to avoid index out of range
+            num_positions = output_memory.shape[1]
+            topk = min(topk, num_positions)
+            
             topk_proposals = torch.topk(output_memory.max(-1)[0], topk, dim=1)[1]
 
             reference_points = torch.gather(
@@ -243,7 +251,7 @@ class CoDeformableDetrTransformer(nn.Module):
             )
             tgt = tgt.detach()
 
-            query_pos = self.query_pos_embed.weight.unsqueeze(0).repeat(
+            query_pos = self.query_pos_embed.weight[:topk].unsqueeze(0).repeat(
                 batch_size, 1, 1
             )
         else:
@@ -254,6 +262,23 @@ class CoDeformableDetrTransformer(nn.Module):
             reference_points = self.reference_points(query_pos).sigmoid()
             enc_outputs_class = None
             enc_outputs_coord_unact = None
+
+        # Concatenate DN queries with content queries if provided
+        if dn_label_embed is not None:
+            tgt = torch.cat([dn_label_embed, tgt], dim=1)
+            # Create zero query_pos for DN queries
+            dn_query_pos = torch.zeros(
+                batch_size, dn_label_embed.shape[1], self.embed_dim, 
+                device=device, dtype=tgt.dtype
+            )
+            query_pos = torch.cat([dn_query_pos, query_pos], dim=1)
+        
+        if dn_bbox_embed is not None:
+            # dn_bbox_embed should be in normalized coordinates
+            dn_reference_points = dn_bbox_embed[..., :2]  # Take only cx, cy
+            if dn_reference_points.shape[-1] == 4:
+                dn_reference_points = dn_reference_points[..., :2]
+            reference_points = torch.cat([dn_reference_points, reference_points], dim=1)
 
         hs, inter_references = self.decoder(
             tgt=tgt,

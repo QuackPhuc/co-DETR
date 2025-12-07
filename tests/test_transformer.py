@@ -328,7 +328,7 @@ class TestCoDeformableDetrTransformer:
             torch.randn(batch_size, 256, 3, 3),
         ]
         
-        hs, init_ref, inter_ref, enc_out = transformer(
+        hs, init_ref, inter_ref, enc_cls, enc_coord = transformer(
             mlvl_feats, mlvl_masks, mlvl_pos_embeds
         )
         
@@ -364,7 +364,7 @@ class TestCoDeformableDetrTransformer:
         mlvl_masks = [torch.zeros(batch_size, h, w, dtype=torch.bool) for h, w in [(15,15), (10,10), (7,7), (5,5)]]
         mlvl_pos_embeds = [torch.randn(batch_size, 256, h, w) for h, w in [(15,15), (10,10), (7,7), (5,5)]]
         
-        hs, _, _, _ = transformer(mlvl_feats, mlvl_masks, mlvl_pos_embeds)
+        hs, _, _, _, _ = transformer(mlvl_feats, mlvl_masks, mlvl_pos_embeds)
         loss = hs.sum()
         loss.backward()
         

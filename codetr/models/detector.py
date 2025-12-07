@@ -267,6 +267,10 @@ class CoDETR(nn.Module):
 
         # Prepare denoising queries if enabled
         attn_mask = None
+        dn_label_embed = None
+        dn_bbox_embed = None
+        dn_meta = None
+        
         if self.dn_generator is not None and targets is not None:
             # Convert targets to format expected by dn_generator
             gt_bboxes = []
@@ -291,15 +295,33 @@ class CoDETR(nn.Module):
                 )
             except Exception:
                 # If denoising fails, continue without it
+                dn_label_embed = None
+                dn_bbox_embed = None
                 attn_mask = None
+                dn_meta = None
 
-        # Transformer forward
+        # Transformer forward with DN queries
         hs, init_reference, inter_references, enc_cls, enc_coord = self.transformer(
-            features, masks, pos_embeds, attn_mask=attn_mask
+            features, masks, pos_embeds, 
+            attn_mask=attn_mask,
+            dn_label_embed=dn_label_embed,
+            dn_bbox_embed=dn_bbox_embed,
         )
 
-        # Query head forward
-        _, _, query_losses = self.query_head(hs, inter_references, targets)
+        # Split DN queries from content queries if DN was used
+        if dn_meta is not None and dn_meta.get('pad_size', 0) > 0:
+            pad_size = dn_meta['pad_size']
+            # hs shape: (num_layers, batch, num_dn + num_queries, embed_dim)
+            # Split off the DN part (we don't use it for now, but it's separated)
+            hs_content = hs[:, :, pad_size:, :]
+            inter_references_content = inter_references[:, :, pad_size:, :]
+            # TODO: Calculate DN loss separately in future
+        else:
+            hs_content = hs
+            inter_references_content = inter_references
+
+        # Query head forward (only with content queries)
+        _, _, query_losses = self.query_head(hs_content, inter_references_content, targets)
 
         losses = {}
         if query_losses is not None:
