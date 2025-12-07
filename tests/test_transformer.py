@@ -34,7 +34,8 @@ class TestMultiScaleDeformableAttention:
         )
         
         batch_size, num_queries, embed_dim = 2, 300, 256
-        num_keys = 100 + 25 + 7 + 4  # Multi-scale keys
+        # spatial_shapes: [[10, 10], [5, 5], [3, 3], [2, 2]] -> 100 + 25 + 9 + 4 = 138 keys
+        num_keys = 100 + 25 + 9 + 4
         
         query = torch.randn(batch_size, num_queries, embed_dim)
         value = torch.randn(batch_size, num_keys, embed_dim)
@@ -56,8 +57,10 @@ class TestMultiScaleDeformableAttention:
         )
         
         batch_size = 2
+        # spatial_shapes: [[5, 5], [3, 3], [2, 2], [1, 1]] -> 25 + 9 + 4 + 1 = 39 keys
+        num_keys = 25 + 9 + 4 + 1
         query = torch.randn(batch_size, 100, 256)
-        value = torch.randn(batch_size, 50, 256)
+        value = torch.randn(batch_size, num_keys, 256)
         reference_points = torch.rand(batch_size, 100, 4, 2)
         spatial_shapes = torch.tensor([[5, 5], [3, 3], [2, 2], [1, 1]], dtype=torch.long)
         level_start_index = torch.tensor([0, 25, 34, 38], dtype=torch.long)
@@ -121,10 +124,13 @@ class TestDeformableTransformerEncoder:
             num_heads=8,
             feedforward_dim=1024,
             dropout=0.1,
+            num_levels=4,
         )
         
-        query = torch.randn(1, 100, 256)
-        reference_points = torch.rand(1, 100, 4, 2)
+        # spatial_shapes: [[5, 5], [4, 4], [3, 3], [2, 2]] -> 25 + 16 + 9 + 4 = 54
+        num_keys = 25 + 16 + 9 + 4  # Total matches sum of spatial shapes
+        query = torch.randn(1, num_keys, 256)
+        reference_points = torch.rand(1, num_keys, 4, 2)
         spatial_shapes = torch.tensor([[5, 5], [4, 4], [3, 3], [2, 2]], dtype=torch.long)
         level_start_index = torch.tensor([0, 25, 41, 50], dtype=torch.long)
         
@@ -145,8 +151,10 @@ class TestDeformableTransformerEncoder:
             num_layers=6,
         )
         
-        query = torch.randn(1, 100, 256)
-        reference_points = torch.rand(1, 100, 4, 2)
+        # spatial_shapes: [[5, 5], [4, 4], [3, 3], [2, 2]] -> 25 + 16 + 9 + 4 = 54
+        num_keys = 25 + 16 + 9 + 4
+        query = torch.randn(1, num_keys, 256)
+        reference_points = torch.rand(1, num_keys, 4, 2)
         spatial_shapes = torch.tensor([[5, 5], [4, 4], [3, 3], [2, 2]], dtype=torch.long)
         level_start_index = torch.tensor([0, 25, 41, 50], dtype=torch.long)
         
@@ -167,8 +175,10 @@ class TestDeformableTransformerEncoder:
             num_layers=3,  # Fewer layers for speed
         )
         
-        query = torch.randn(1, 50, 256, requires_grad=True)
-        reference_points = torch.rand(1, 50, 4, 2)
+        # spatial_shapes: [[4, 4], [3, 3], [2, 2], [1, 1]] -> 16 + 9 + 4 + 1 = 30
+        num_keys = 16 + 9 + 4 + 1
+        query = torch.randn(1, num_keys, 256, requires_grad=True)
+        reference_points = torch.rand(1, num_keys, 4, 2)
         spatial_shapes = torch.tensor([[4, 4], [3, 3], [2, 2], [1, 1]], dtype=torch.long)
         level_start_index = torch.tensor([0, 16, 25, 29], dtype=torch.long)
         
@@ -190,10 +200,13 @@ class TestDeformableTransformerDecoder:
             num_heads=8,
             feedforward_dim=1024,
             dropout=0.1,
+            num_levels=4,
         )
         
+        # spatial_shapes: [[5, 5], [4, 4], [3, 3], [2, 2]] -> 25 + 16 + 9 + 4 = 54
+        num_keys = 25 + 16 + 9 + 4
         query = torch.randn(1, 300, 256)
-        memory = torch.randn(1, 100, 256)
+        memory = torch.randn(1, num_keys, 256)
         reference_points = torch.rand(1, 300, 4, 2)
         spatial_shapes = torch.tensor([[5, 5], [4, 4], [3, 3], [2, 2]], dtype=torch.long)
         level_start_index = torch.tensor([0, 25, 41, 50], dtype=torch.long)
@@ -215,15 +228,17 @@ class TestDeformableTransformerDecoder:
             num_layers=6,
         )
         
+        # spatial_shapes: [[5, 5], [4, 4], [3, 3], [2, 2]] -> 25 + 16 + 9 + 4 = 54
+        num_keys = 25 + 16 + 9 + 4
         query = torch.randn(1, 300, 256)
-        memory = torch.randn(1, 100, 256)
+        memory = torch.randn(1, num_keys, 256)
         reference_points = torch.rand(1, 300, 2)
         spatial_shapes = torch.tensor([[5, 5], [4, 4], [3, 3], [2, 2]], dtype=torch.long)
         level_start_index = torch.tensor([0, 25, 41, 50], dtype=torch.long)
         valid_ratios = torch.ones(1, 4, 2)
         
         outputs, inter_refs = decoder(
-            query, memory, reference_points, 
+            query, reference_points, memory, 
             spatial_shapes, level_start_index, valid_ratios
         )
         
@@ -254,15 +269,17 @@ class TestDeformableTransformerDecoder:
             num_layers=2,
         )
         
+        # spatial_shapes: [[4, 4], [3, 3], [2, 2], [1, 1]] -> 16 + 9 + 4 + 1 = 30
+        num_keys = 16 + 9 + 4 + 1
         query = torch.randn(1, 100, 256, requires_grad=True)
-        memory = torch.randn(1, 50, 256, requires_grad=True)
+        memory = torch.randn(1, num_keys, 256, requires_grad=True)
         reference_points = torch.rand(1, 100, 2)
         spatial_shapes = torch.tensor([[4, 4], [3, 3], [2, 2], [1, 1]], dtype=torch.long)
         level_start_index = torch.tensor([0, 16, 25, 29], dtype=torch.long)
         valid_ratios = torch.ones(1, 4, 2)
         
         outputs, _ = decoder(
-            query, memory, reference_points,
+            query, reference_points, memory,
             spatial_shapes, level_start_index, valid_ratios
         )
         loss = outputs.sum()
