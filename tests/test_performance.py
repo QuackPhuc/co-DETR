@@ -166,22 +166,23 @@ class TestCUDATensorCompatibility:
         
         batch_size = 2
         num_queries = 100
+        num_layers = 2
         
         # Create CUDA inputs
-        hs = torch.rand(2, batch_size, num_queries, 256, device=cuda_device)  # num_layers, B, Q, C
-        init_reference = torch.rand(batch_size, num_queries, 4, device=cuda_device)
-        inter_references = torch.rand(2, batch_size, num_queries, 4, device=cuda_device)
+        # hidden_states: (num_layers, batch, num_query, embed_dims)
+        hs = torch.rand(num_layers, batch_size, num_queries, 256, device=cuda_device)
+        # references: (num_layers, batch, num_query, 2) - xy reference points in [0,1]
+        references = torch.rand(num_layers, batch_size, num_queries, 2, device=cuda_device)
         
         with torch.no_grad():
-            outputs = head(
+            cls_scores, bbox_preds, _ = head(
                 hidden_states=hs,
-                init_reference=init_reference,
-                inter_references=inter_references,
+                references=references,
             )
         
-        assert 'pred_logits' in outputs, "Should have pred_logits"
-        assert 'pred_boxes' in outputs, "Should have pred_boxes"
-        assert outputs['pred_logits'].is_cuda, "Logits should be on CUDA"
+        assert cls_scores.shape == (num_layers, batch_size, num_queries, 80)
+        assert bbox_preds.shape == (num_layers, batch_size, num_queries, 4)
+        assert cls_scores.is_cuda, "Logits should be on CUDA"
     
     def test_losses_cuda_computation(self, cuda_device):
         """Loss functions should work correctly on CUDA."""
@@ -194,8 +195,15 @@ class TestCUDATensorCompatibility:
         pred_logits = torch.rand(2, 100, 80, device=cuda_device)
         target_classes = torch.randint(0, 80, (2, 100), device=cuda_device)
         
-        pred_boxes = torch.rand(2, 100, 4, device=cuda_device)
-        target_boxes = torch.rand(2, 100, 4, device=cuda_device)
+        # Create valid xyxy boxes: ensure x1 < x2 and y1 < y2
+        # Method: generate x1,y1 in [0, 0.5] and x2,y2 = x1,y1 + [0.1, 0.5]
+        xy1 = torch.rand(2, 100, 2, device=cuda_device) * 0.4  # [0, 0.4]
+        xy2 = xy1 + torch.rand(2, 100, 2, device=cuda_device) * 0.4 + 0.1  # [x1+0.1, x1+0.5]
+        pred_boxes = torch.cat([xy1, xy2], dim=-1)  # (2, 100, 4) xyxy format
+        
+        xy1_t = torch.rand(2, 100, 2, device=cuda_device) * 0.4
+        xy2_t = xy1_t + torch.rand(2, 100, 2, device=cuda_device) * 0.4 + 0.1
+        target_boxes = torch.cat([xy1_t, xy2_t], dim=-1)  # (2, 100, 4) xyxy format
         
         # Compute losses
         cls_loss = focal_loss(
@@ -231,8 +239,8 @@ class TestCUDATensorCompatibility:
         
         images = torch.rand(2, 3, 224, 224, device=cuda_device)
         
-        # Test with autocast
-        with torch.cuda.amp.autocast():
+        # Test with autocast (new API)
+        with torch.amp.autocast('cuda'):
             features = backbone(images)
             outputs = neck(features)
         
@@ -450,20 +458,21 @@ class TestMemoryStressLargerBatches:
         head.eval()
         
         batch_size = 2
+        num_layers = 2
         
-        hs = torch.rand(2, batch_size, num_queries, 256, device=cuda_device)
-        init_reference = torch.rand(batch_size, num_queries, 4, device=cuda_device)
-        inter_references = torch.rand(2, batch_size, num_queries, 4, device=cuda_device)
+        # hidden_states: (num_layers, batch, num_query, embed_dims)
+        hs = torch.rand(num_layers, batch_size, num_queries, 256, device=cuda_device)
+        # references: (num_layers, batch, num_query, 2) - xy reference points
+        references = torch.rand(num_layers, batch_size, num_queries, 2, device=cuda_device)
         
         with torch.no_grad():
-            outputs = head(
+            cls_scores, bbox_preds, _ = head(
                 hidden_states=hs,
-                init_reference=init_reference,
-                inter_references=inter_references,
+                references=references,
             )
         
-        assert outputs['pred_logits'].shape[1] == num_queries
-        assert not torch.isnan(outputs['pred_logits']).any()
+        assert cls_scores.shape[2] == num_queries
+        assert not torch.isnan(cls_scores).any()
 
 
 # ============================================================================
@@ -831,7 +840,10 @@ class TestCombinedStressScenarios:
             pos_embeds = [pos_encoder(f, m) for f, m in zip(neck_feats, masks)]
             query_embed = torch.rand(100, 512, device=cuda_device)
             
-            # Transformer
+            # Transformer returns:
+            # - hs: (num_decoder_layers, batch, num_queries, embed_dim)
+            # - init_ref: (batch, num_queries, 2)
+            # - inter_refs: (num_decoder_layers, batch, num_queries, 2)
             hs, init_ref, inter_refs, _, _ = transformer(
                 srcs=neck_feats,
                 masks=masks,
@@ -839,17 +851,18 @@ class TestCombinedStressScenarios:
                 query_embed=query_embed,
             )
             
-            # Head
-            outputs = head(
+            # Head expects references with shape (num_layers, batch, num_query, 2)
+            # Use inter_refs which has this shape
+            cls_scores, bbox_preds, _ = head(
                 hidden_states=hs,
-                init_reference=init_ref,
-                inter_references=inter_refs,
+                references=inter_refs,
             )
         
-        assert outputs['pred_logits'].shape == (batch_size, 100, 80)
-        assert outputs['pred_boxes'].shape == (batch_size, 100, 4)
-        assert not torch.isnan(outputs['pred_logits']).any()
-        assert not torch.isnan(outputs['pred_boxes']).any()
+        num_layers = cls_scores.shape[0]
+        assert cls_scores.shape == (num_layers, batch_size, 100, 80)
+        assert bbox_preds.shape == (num_layers, batch_size, 100, 4)
+        assert not torch.isnan(cls_scores).any()
+        assert not torch.isnan(bbox_preds).any()
     
     def test_training_step_memory_efficiency(self, cuda_device):
         """Verify memory efficiency during training step."""
