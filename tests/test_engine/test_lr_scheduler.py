@@ -12,6 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 import math
+import warnings
 
 from codetr.engine.lr_scheduler import (
     WarmupStepLR,
@@ -19,6 +20,20 @@ from codetr.engine.lr_scheduler import (
     WarmupCosineLR,
     build_lr_scheduler,
 )
+
+
+# Suppress the PyTorch scheduler warning for tests
+# We intentionally call scheduler.step() without optimizer.step() for unit testing
+@pytest.fixture(autouse=True)
+def suppress_scheduler_warning():
+    """Suppress the scheduler.step() before optimizer.step() warning."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", 
+            message=".*lr_scheduler.step.*optimizer.step.*",
+            category=UserWarning
+        )
+        yield
 
 
 class TestWarmupStepLR:
